@@ -1,0 +1,31 @@
+<idea-plugin>
+    <id>com.org.refactor.plugin.k2</id>
+    <name>Android Auto Refactor (K2)</name>
+    <vendor email="dev@example.com" url="https://example.com">Org</vendor>
+
+    <description><![CDATA[
+        Automatically refactors Android UI components by appending a configurable suffix
+        to classes, functions, and properties using semantic PSI-based renaming.
+        Supports Activity, Fragment, Dialog, DialogFragment, BottomSheetDialogFragment.
+        This build targets the Kotlin K2 mode and uses the Kotlin Analysis API directly
+        (no reflection) for property/getter disambiguation and override resolution.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+    <depends>org.jetbrains.kotlin</depends>
+
+    <extensions defaultExtensionNs="org.jetbrains.kotlin">
+        <supportsKotlinPluginMode supportsK2="true" />
+    </extensions>
+
+    <actions>
+        <action
+            id="AndroidRefactorK2.Start"
+            class="com.org.refactor.plugin.AndroidRefactorAction"
+            text="Android Refactor (K2)"
+            description="Automatically refactor Android UI components (K2 Analysis API)">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>
