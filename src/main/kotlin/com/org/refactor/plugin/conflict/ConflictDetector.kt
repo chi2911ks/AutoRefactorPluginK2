@@ -2,10 +2,17 @@ package com.org.refactor.plugin.conflict
 
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.psi.PsiManager
 import com.org.refactor.plugin.model.*
 import com.org.refactor.plugin.references.DependencyGraph
 import com.org.refactor.plugin.references.ReferenceType
 import com.org.refactor.plugin.references.XmlReferenceParser
+import org.jetbrains.kotlin.psi.KtClassOrObject
+import org.jetbrains.kotlin.psi.KtFile
+import org.jetbrains.kotlin.psi.KtNamedDeclaration
+import org.jetbrains.kotlin.psi.KtNamedFunction
+import org.jetbrains.kotlin.psi.psiUtil.collectDescendantsOfType
 
 class ConflictDetector(private val project: Project) {
 
@@ -38,6 +45,7 @@ class ConflictDetector(private val project: Project) {
         val conflicts = mutableListOf<RefactorConflict>()
 
         detectDuplicateNames(plan, conflicts)
+        detectExistingTargets(plan, conflicts)
         detectOverrideConflicts(graph, conflicts)
         detectJavaInteropIssues(graph, conflicts)
         detectReflectionRisks(graph, conflicts)
@@ -49,6 +57,59 @@ class ConflictDetector(private val project: Project) {
         return ConflictReport(conflicts = conflicts, isSafe = !hasErrors)
     }
 
+    private fun detectExistingTargets(
+        plan: RefactorPlan,
+        conflicts: MutableList<RefactorConflict>,
+    ) {
+        for (rename in plan.componentRenames) {
+            val file = kotlinFile(rename.sourceFile) ?: continue
+            val source = file.collectDescendantsOfType<KtClassOrObject>().firstOrNull {
+                it.textRange.startOffset == rename.declarationOffset && it.name == rename.oldName
+            } ?: continue
+            val collision = source.parent.children.filterIsInstance<KtClassOrObject>()
+                .any { it !== source && it.name == rename.newName }
+            if (collision) addExistingTargetConflict(rename.oldName, rename.newName, rename.sourceFile, conflicts)
+        }
+
+        for (rename in plan.symbolRenames) {
+            val file = kotlinFile(rename.sourceFile) ?: continue
+            val source = file.collectDescendantsOfType<KtNamedDeclaration>().firstOrNull {
+                it.textRange.startOffset == rename.declarationOffset && it.name == rename.oldName
+            } ?: continue
+            val collision = source.parent.children.filterIsInstance<KtNamedDeclaration>().any { candidate ->
+                if (candidate === source || candidate.name != rename.newName) return@any false
+                if (source is KtNamedFunction && candidate is KtNamedFunction) {
+                    source.valueParameters.size == candidate.valueParameters.size
+                } else {
+                    true
+                }
+            }
+            if (collision) addExistingTargetConflict(rename.oldName, rename.newName, rename.sourceFile, conflicts)
+        }
+    }
+
+    private fun kotlinFile(path: String): KtFile? {
+        val virtualFile = LocalFileSystem.getInstance().findFileByPath(path) ?: return null
+        return PsiManager.getInstance(project).findFile(virtualFile) as? KtFile
+    }
+
+    private fun addExistingTargetConflict(
+        oldName: String,
+        newName: String,
+        sourceFile: String,
+        conflicts: MutableList<RefactorConflict>,
+    ) {
+        conflicts.add(
+            RefactorConflict(
+                type = ConflictType.DUPLICATE_NAME,
+                severity = ConflictSeverity.ERROR,
+                message = "Cannot rename '$oldName' to '$newName': target already exists in the same scope",
+                sourceFile = sourceFile,
+                symbolName = oldName,
+            ),
+        )
+    }
+
     private fun detectDuplicateNames(
         plan: RefactorPlan,
         conflicts: MutableList<RefactorConflict>,
@@ -56,15 +117,16 @@ class ConflictDetector(private val project: Project) {
         val allNewNames = mutableMapOf<String, MutableList<String>>()
 
         for (rename in plan.componentRenames) {
-            allNewNames.getOrPut(rename.newName) { mutableListOf() }.add(rename.oldName)
+            val owner = rename.fqn.substringBeforeLast('.', missingDelimiterValue = "")
+            allNewNames.getOrPut("class:$owner:${rename.newName}") { mutableListOf() }.add(rename.oldName)
         }
         for (rename in plan.symbolRenames) {
-            val key = "${rename.sourceFile}:${rename.newName}"
+            val key = "${rename.kind}:${rename.ownerScope}:${rename.newName}"
             allNewNames.getOrPut(key) { mutableListOf() }.add(rename.oldName)
         }
 
         for ((newName, oldNames) in allNewNames) {
-            if (oldNames.size > 1) {
+            if (oldNames.distinct().size > 1) {
                 conflicts.add(RefactorConflict(
                     type = ConflictType.DUPLICATE_NAME,
                     severity = ConflictSeverity.ERROR,
@@ -216,9 +278,8 @@ class ConflictDetector(private val project: Project) {
         conflicts: MutableList<RefactorConflict>,
     ) {
         for (rename in plan.componentRenames) {
-            if (rename.sourceFile.contains("build/generated") ||
-                rename.sourceFile.contains("/generated/")
-            ) {
+            val path = rename.sourceFile.replace('\\', '/').lowercase()
+            if ("/build/" in path || "/generated/" in path) {
                 conflicts.add(RefactorConflict(
                     type = ConflictType.GENERATED_CODE,
                     severity = ConflictSeverity.ERROR,

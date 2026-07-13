@@ -3,108 +3,75 @@ package com.org.refactor.plugin.discovery
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
-import com.intellij.psi.*
-import com.org.refactor.plugin.model.*
+import com.intellij.psi.PsiManager
+import com.org.refactor.plugin.model.ComponentInfo
+import com.org.refactor.plugin.model.ComponentType
+import com.org.refactor.plugin.model.ProjectIndex
+import com.org.refactor.plugin.model.SourceFile
+import org.jetbrains.kotlin.psi.KtClass
+import org.jetbrains.kotlin.psi.KtClassOrObject
+import org.jetbrains.kotlin.psi.KtEnumEntry
+import org.jetbrains.kotlin.psi.KtFile
+import org.jetbrains.kotlin.psi.KtObjectDeclaration
+import org.jetbrains.kotlin.psi.psiUtil.collectDescendantsOfType
 
+/** Discovers named Kotlin class-like declarations in writable project sources. */
 class ComponentDiscoverer(private val project: Project) {
 
-    fun discover(index: ProjectIndex): List<ComponentInfo> {
-        return ReadAction.compute<List<ComponentInfo>, RuntimeException> {
-            doDiscover(index)
-        }
-    }
-
-    private fun doDiscover(index: ProjectIndex): List<ComponentInfo> {
-        val components = mutableListOf<ComponentInfo>()
-
-        for (sourceFile in index.allKotlinFiles + index.allJavaFiles) {
-            try {
-                val psiClasses = loadClasses(sourceFile.absolutePath)
-                for (psiClass in psiClasses) {
-                    if (isGenerated(psiClass)) continue
-                    if (isExcluded(psiClass)) continue
-
-                    val match = findMatch(psiClass)
-                    if (match != null) {
-                        components.add(ComponentInfo(
-                            file = sourceFile,
-                            className = psiClass.name ?: "Anonymous",
-                            superClass = match.superFqn,
-                            superClassShort = match.superFqn.substringAfterLast('.'),
-                            packageName = psiClass.qualifiedName?.substringBeforeLast('.') ?: "",
-                            componentType = match.type,
-                            isAbstract = psiClass.isInterface || psiClass.hasModifierProperty(PsiModifier.ABSTRACT),
-                        ))
-                    }
-                }
-            } catch (_: Exception) {}
+    fun discover(index: ProjectIndex): List<ComponentInfo> =
+        ReadAction.compute<List<ComponentInfo>, RuntimeException> {
+            index.allKotlinFiles.flatMap(::discoverFile)
         }
 
-        return components
+    private fun discoverFile(sourceFile: SourceFile): List<ComponentInfo> {
+        if (isGenerated(sourceFile.absolutePath)) return emptyList()
+        val virtualFile = LocalFileSystem.getInstance().findFileByPath(sourceFile.absolutePath)
+            ?: return emptyList()
+        if (!virtualFile.isWritable) return emptyList()
+        val ktFile = PsiManager.getInstance(project).findFile(virtualFile) as? KtFile
+            ?: return emptyList()
+
+        return ktFile.collectDescendantsOfType<KtClassOrObject>()
+            .asSequence()
+            .filter { it.fqName != null }
+            .filter { it.parent is KtFile }
+            .filterNot { it is KtEnumEntry }
+            .filterNot {
+                it is KtObjectDeclaration &&
+                    (it.isObjectLiteral() || it.isCompanion() && it.nameIdentifier == null)
+            }
+            .mapNotNull { declaration -> declaration.toComponentInfo(sourceFile, ktFile) }
+            .distinctBy { it.fqn }
+            .toList()
     }
 
-    private data class Match(val type: ComponentType, val superFqn: String)
-
-    private fun findMatch(psiClass: PsiClass): Match? {
-        // Walk the (single) superclass chain to identify the Android base type and capture its FQN.
-        // K2-native: light classes resolve correctly under the Kotlin plugin dependency.
-        var current: PsiClass? = psiClass.superClass ?: return null
-
-        while (current != null) {
-            val qn = current.qualifiedName ?: current.name ?: ""
-            val name = current.name ?: ""
-
-            // Check each type
-            if (qn in AndroidComponentTypes.ACTIVITY_SUPERCLASSES ||
-                name == "Activity" || name == "AppCompatActivity" || name == "ComponentActivity" ||
-                name == "FragmentActivity") {
-                return Match(ComponentType.ACTIVITY, qn)
+    private fun KtClassOrObject.toComponentInfo(sourceFile: SourceFile, file: KtFile): ComponentInfo? {
+        val name = name ?: return null
+        val qualifiedName = fqName?.asString() ?: return null
+        val type = when (this) {
+            is KtObjectDeclaration -> ComponentType.OBJECT
+            is KtClass -> when {
+                isAnnotation() -> ComponentType.ANNOTATION
+                isInterface() -> ComponentType.INTERFACE
+                isEnum() -> ComponentType.ENUM
+                else -> ComponentType.CLASS
             }
-            if (qn == "com.google.android.material.bottomsheet.BottomSheetDialogFragment" ||
-                name == "BottomSheetDialogFragment") {
-                return Match(ComponentType.BOTTOM_SHEET_DIALOG_FRAGMENT, qn)
-            }
-            if (qn in AndroidComponentTypes.DIALOG_FRAGMENT_SUPERCLASSES ||
-                (name == "DialogFragment" && qn.contains("fragment"))) {
-                return Match(ComponentType.DIALOG_FRAGMENT, qn)
-            }
-            if (qn in AndroidComponentTypes.FRAGMENT_SUPERCLASSES ||
-                (name == "Fragment" && !qn.contains("Dialog"))) {
-                return Match(ComponentType.FRAGMENT, qn)
-            }
-            if (qn in AndroidComponentTypes.DIALOG_SUPERCLASSES ||
-                name == "Dialog" || name == "AppCompatDialog") {
-                return Match(ComponentType.DIALOG, qn)
-            }
-
-            current = current.superClass
+            else -> return null
         }
-        return null
+        return ComponentInfo(
+            file = sourceFile,
+            className = name,
+            fqn = qualifiedName,
+            packageName = file.packageFqName.asString(),
+            componentType = type,
+            declarationOffset = textRange.startOffset,
+            isTopLevel = parent is KtFile,
+            isAbstract = this is KtClass && (isInterface() || hasModifier(org.jetbrains.kotlin.lexer.KtTokens.ABSTRACT_KEYWORD)),
+        )
     }
 
-    private fun loadClasses(path: String): List<PsiClass> {
-        val vFile = LocalFileSystem.getInstance().findFileByPath(path) ?: return emptyList()
-        val psiFile = PsiManager.getInstance(project).findFile(vFile)
-            as? PsiClassOwner ?: return emptyList()
-        return psiFile.classes.toList()
-    }
-
-    private fun isExcluded(psiClass: PsiClass): Boolean {
-        var current: PsiClass? = psiClass.superClass ?: return false
-        while (current != null) {
-            val qn = current.qualifiedName ?: ""
-            if (AndroidComponentTypes.isExcludedSuperclass(qn)) return true
-            current = current.superClass
-        }
-        return false
-    }
-
-    private fun isGenerated(psiClass: PsiClass): Boolean {
-        val path = psiClass.containingFile?.virtualFile?.path ?: return false
-        return path.contains("build/generated") ||
-            path.contains("/generated/") ||
-            psiClass.name == "R" || psiClass.name == "BuildConfig" ||
-            psiClass.qualifiedName?.startsWith("androidx.databinding") == true ||
-            psiClass.qualifiedName?.startsWith("androidx.viewbinding") == true
+    private fun isGenerated(path: String): Boolean {
+        val normalized = path.replace('\\', '/').lowercase()
+        return "/build/" in normalized || "/generated/" in normalized
     }
 }

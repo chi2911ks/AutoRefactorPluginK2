@@ -7,6 +7,8 @@ import com.intellij.psi.*
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.org.refactor.plugin.model.*
+import org.jetbrains.kotlin.psi.KtNamedDeclaration
+import org.jetbrains.kotlin.psi.psiUtil.collectDescendantsOfType
 
 data class ResolvedReference(
     val symbolName: String, val sourceFile: String, val targetFile: String,
@@ -49,9 +51,11 @@ class ReferenceResolver(private val project: Project) {
                 .findClass(symbol.fqn, GlobalSearchScope.allScope(project))
         }
 
-        val doc = PsiDocumentManager.getInstance(project).getDocument(psiFile) ?: return null
-        if (symbol.lineNumber < 1) return null
-        return psiFile.findElementAt(doc.getLineStartOffset(symbol.lineNumber - 1))?.parent
+        return psiFile.collectDescendantsOfType<KtNamedDeclaration>()
+            .firstOrNull {
+                it.textRange.startOffset == symbol.declarationOffset &&
+                    it.name == symbol.name
+            }
     }
 
     private fun classify(el: PsiElement): ReferenceType = when (el.parent) {

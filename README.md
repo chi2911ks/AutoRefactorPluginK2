@@ -1,74 +1,68 @@
-# Android Auto Refactor (K2)
+# Kotlin Auto Refactor (K2)
 
-This is an IntelliJ IDEA / Android Studio plugin designed to automate the refactoring of Android UI components. It intelligently appends a configurable suffix to UI-related classes, functions, and properties using semantic PSI-based renaming.
-
-This plugin specifically targets the **Kotlin K2 mode**, leveraging the new **Kotlin Analysis API** directly (without reflection) for robust property/getter disambiguation and precise override resolution.
+An IntelliJ IDEA / Android Studio plugin for applying suffix-based renames across writable Kotlin project sources. It uses Kotlin PSI and the K2 Analysis API to update declarations and references safely.
 
 ## Features
 
-- **Automated Refactoring**: Appends a specified suffix to UI components.
-- **Supported Android Components**:
-  - `Activity`
-  - `Fragment`
-  - `Dialog`
-  - `DialogFragment`
-  - `BottomSheetDialogFragment`
-- **K2 Ready**: Fully compatible with the Kotlin K2 compiler and IDE plugin mode.
-- **Semantic Renaming**: Uses IntelliJ's powerful PSI (Program Structure Interface) and the K2 Analysis API to ensure references are updated accurately across your codebase.
+- Independently refactor classes, functions, and variables.
+- Limit scan, preview, refactor, and shuffle targets to one or more selected modules, or use all modules.
+- Group IntelliJ source-set modules such as `app.main` and `app.test` under the logical `app` module.
+- Discover top-level classes plus top-level, member, nested-scope, and local functions and variables.
+- Refactor only top-level class-like declarations, including classes, interfaces, objects, enum classes, and annotations. Nested classes and enum entries are never renamed.
+- Exclude function parameters, generated sources, read-only declarations, and SDK/library overrides.
+- Remove an optional existing suffix before adding the new suffix. For example, `MainActivityInv124` can become `MainActivityInv125`.
+- Independently shuffle function and property declaration order while preserving anchors and property dependency blocks.
+- Preview planned renames and conflicts before execution.
+
+The default selection refactors classes only. Function, variable, and shuffle options are opt-in each time the dialog opens.
 
 ## Prerequisites
 
-- IntelliJ IDEA Community/Ultimate 2025.1+ or compatible Android Studio versions based on 2025.1+.
-- Kotlin Plugin with K2 mode support.
+- JDK 21
+- IntelliJ IDEA 2025.1+ or a compatible Android Studio build
+- Kotlin plugin with K2 mode support
 
-## Building the Plugin
+## Build
 
-To build the plugin from source, you need JDK 21.
+Use the checked-in Gradle wrapper:
 
-1. Clone or download the repository.
-2. Open a terminal in the root directory of the project.
-3. Run the Gradle build command:
+```bash
+# macOS/Linux
+./gradlew --no-daemon buildPlugin
 
-   ```bash
-   # On macOS/Linux
-   ./gradlew buildPlugin
+# Windows
+gradlew.bat --no-daemon buildPlugin
+```
 
-   # On Windows
-   gradlew.bat buildPlugin
-   ```
+The installable archive is generated under `build/distributions/`.
 
-4. Once the build completes successfully, the plugin archive will be generated at:
-   `build/distributions/AutoRefactorPluginK2-1.0.0-SNAPSHOT.zip`
+Run tests and verification with:
 
-## Installation
+```bash
+./gradlew test
+./gradlew check
+```
 
-You can install the compiled plugin directly into your IDE:
+Launch a sandbox IDE with:
 
-1. Open IntelliJ IDEA or Android Studio.
-2. Navigate to **Settings / Preferences** -> **Plugins**.
-3. Click the gear icon ⚙️ and select **Install Plugin from Disk...**.
-4. Choose the `.zip` file generated in the `build/distributions/` directory.
-5. Click **Apply** and **Restart IDE** when prompted.
-
-Alternatively, for development and testing, you can launch a sandbox IDE with the plugin installed by running:
 ```bash
 ./gradlew runIde
 ```
 
-## How to Use
+## Usage
 
-1. Open your Android project in the IDE.
-2. Ensure your project has indexed properly.
-3. From the top menu bar, go to **Tools** -> **Android Refactor (K2)**.
-4. (Follow the on-screen prompts or dialogs, if any, to provide the desired suffix and confirm the refactoring scope).
-5. The plugin will analyze your codebase, find subclasses of the supported Android components, and perform safe, semantic renaming on the classes, functions, and properties.
-6. Review the changes in the "Find Refactoring Preview" tool window (if prompted) or check your version control diff to verify the automated changes.
+1. Open a Kotlin project and wait for indexing to finish.
+2. Select **Tools → Kotlin Project Refactor (K2)**.
+3. Select **All modules** or use Ctrl/Shift to select multiple project modules.
+4. Enter the suffix to add and, optionally, the existing suffix to remove.
+5. Select refactor and shuffle operations, then click **Scan Project**.
+6. Review classes, symbols, shuffle targets, and conflicts.
+7. Click **OK** to execute the valid plan.
 
-## Development
+Class renames run immediately after confirmation in the plugin dialog; IntelliJ's secondary Find/Refactoring Preview is disabled.
 
-- **Language**: Kotlin 2.1.0
-- **Framework**: IntelliJ Platform Plugin Template (`org.jetbrains.intellij.platform`)
-- **Analysis**: Kotlin Analysis API (K2)
+The plugin writes a Markdown report to the project root. Per-symbol diagnostic details are available in `.autorefactor-symbols.log`.
 
-### Important Notes
-Because this plugin uses the K2 Analysis API natively, it avoids the overhead and fragility of reflection-based solutions that were common in K1, providing much faster and more accurate refactoring results.
+## Development Notes
+
+K2 Analysis API access is centralized in `psi/K2Analysis.kt`. Rename targets must resolve to real Kotlin PSI rather than name-only light methods. Declaration replacements are deduplicated and applied in descending offset order, and SDK/library override contracts must remain unchanged.

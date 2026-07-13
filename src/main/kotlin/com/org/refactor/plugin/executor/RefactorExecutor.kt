@@ -15,6 +15,8 @@ import com.intellij.psi.search.searches.OverridingMethodsSearch
 import com.intellij.psi.search.FilenameIndex
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.refactoring.rename.RenameProcessor
+import com.intellij.refactoring.rename.naming.AutomaticRenamer
+import com.intellij.usageView.UsageInfo
 import com.org.refactor.plugin.model.*
 import com.org.refactor.plugin.psi.K2Analysis
 import org.jetbrains.kotlin.asJava.LightClassUtil
@@ -22,13 +24,24 @@ import org.jetbrains.kotlin.asJava.toLightMethods
 import org.jetbrains.kotlin.psi.KtClassOrObject
 import org.jetbrains.kotlin.psi.KtDeclaration
 import org.jetbrains.kotlin.psi.KtFile
+import org.jetbrains.kotlin.psi.KtNamedDeclaration
 import org.jetbrains.kotlin.psi.KtNamedFunction
+import org.jetbrains.kotlin.psi.KtParameter
 import org.jetbrains.kotlin.psi.KtProperty
+import org.jetbrains.kotlin.psi.psiUtil.collectDescendantsOfType
 import org.jetbrains.kotlin.psi.psiUtil.containingClassOrObject
 
 class RefactorExecutor(private val project: Project) {
 
     private data class Rep(val file: String, val start: Int, val end: Int)
+    private data class SymbolTarget(
+        val rename: SymbolRename,
+        val pointer: SmartPsiElementPointer<PsiNamedElement>?,
+    )
+    private data class ClassTarget(
+        val rename: ComponentRename,
+        val pointer: SmartPsiElementPointer<KtClassOrObject>?,
+    )
 
     data class ExecutionResult(
         val success: Boolean, val classesRenamed: Int, val symbolsRenamed: Int,
@@ -37,54 +50,77 @@ class RefactorExecutor(private val project: Project) {
     )
 
     fun execute(plan: RefactorPlan): ExecutionResult {
+        val application = ApplicationManager.getApplication()
+        if (application.isDispatchThread) return executeOnEdt(plan)
+
+        var result: ExecutionResult? = null
+        application.invokeAndWait {
+            result = executeOnEdt(plan)
+        }
+        return requireNotNull(result)
+    }
+
+    /**
+     * PSI rename processors and document mutations require IntelliJ's EDT write-intent context.
+     * The action may call this executor from a background progress task, so all model access in
+     * the mutation phase is marshalled to EDT as one operation.
+     */
+    private fun executeOnEdt(plan: RefactorPlan): ExecutionResult {
         val startTime = System.currentTimeMillis()
         val errors = mutableListOf<String>()
         val warnings = mutableListOf<String>()
         var classesRenamed = 0; var symbolsRenamed = 0; var filesRenamed = 0
         val symbolLog = mutableListOf<String>()   // per-symbol diagnostic trace
 
-        val unchecked = plan.componentRenames.filter { it.checked && !it.oldName.endsWith(plan.suffix) }
-        val byPkg = unchecked.groupBy { it.fqn.substringBeforeLast('.') }
-        val sortedPkgs = byPkg.keys.sortedWith(compareBy({ tier(it) }, { it }))
-        val allSymbols = plan.symbolRenames.filter { it.checked && !it.oldName.endsWith(plan.suffix) }
-
-        for (pkg in sortedPkgs) {
-            val pkgComps = byPkg[pkg] ?: continue
-            val fqns = pkgComps.map { it.fqn }.toSet()
-            val pkgSymbols = allSymbols.filter { it.fqn.substringBeforeLast('.') in fqns }
-
-            // ═══ All symbols via ReferencesSearch (NO RenameProcessor — avoids getter confusion) ═══
-            for (sym in pkgSymbols) {
-                try {
-                    val ok = ReadAction.compute<Boolean, RuntimeException> { renameSymbol(sym, symbolLog) }
-                    if (ok) symbolsRenamed++
-                } catch (e: Exception) { errors.add("${sym.oldName}: ${e.message}"); symbolLog.add("FAIL ${sym.oldName}->${sym.newName}: ${e.message}") }
+        val unchecked = plan.componentRenames.filter { it.checked }
+        val classTargets = createClassTargets(unchecked)
+        val symbolTargets = createSymbolTargets(plan.symbolRenames.filter { it.checked })
+        val overrideIndex = buildKotlinOverrideIndex(
+            symbolTargets.asSequence()
+                .filter { it.rename.kind == SymbolKind.FUNCTION }
+                .map { it.rename.oldName }
+                .toSet(),
+        )
+        for (target in symbolTargets) {
+            val symbol = target.rename
+            try {
+                val ok = renameSymbol(symbol, target.pointer?.element, symbolLog, overrideIndex)
+                if (ok) symbolsRenamed++
+            } catch (e: Exception) {
+                errors.add("${symbol.oldName}: ${e.message}")
+                symbolLog.add("FAIL ${symbol.oldName}->${symbol.newName}: ${e.message}")
             }
-
-            // ═══ Classes via RenameProcessor (only engine for imports, this@, XML refs) ═══
-            for (comp in pkgComps) {
-                try {
-                    ReadAction.compute<Unit, RuntimeException> { renameClass(comp) }
-                    classesRenamed++
-                } catch (e: Exception) { errors.add("${comp.oldName}: ${e.message}") }
+        }
+        for (target in classTargets.sortedByDescending { it.rename.fqn.count { char -> char == '.' } }) {
+            val rename = target.rename
+            try {
+                val declaration = target.pointer?.element
+                    ?: throw IllegalStateException("Declaration not found: ${rename.fqn}")
+                renameClass(declaration, rename.newName)
+                classesRenamed++
+            } catch (e: Exception) {
+                errors.add("${rename.oldName}: ${e.message}")
             }
         }
 
         // ═══ Post: XML + ProGuard + Files ═══
         val classMap = unchecked.associate { it.oldName to it.newName }
-        for (ext in listOf("xml", "pro")) {
-            for (vf in FilenameIndex.getAllFilesByExt(project, ext, GlobalSearchScope.projectScope(project))) {
-                applyToDoc(vf) { replaceClassNames(it, classMap) }
-            }
-        }
-        project.baseDir?.let { baseDir ->
-            VfsUtilCore.visitChildrenRecursively(baseDir, object : com.intellij.openapi.vfs.VirtualFileVisitor<Void>() {
-                override fun visitFile(f: VirtualFile): Boolean {
-                    if (!f.isDirectory && f.name in setOf("proguard-rules.pro", "proguard-rules.txt", "proguard.cfg"))
-                        applyToDoc(f) { replaceClassNames(it, classMap) }
-                    return true
+        if (classMap.isNotEmpty()) {
+            for (ext in listOf("xml", "pro")) {
+                for (vf in FilenameIndex.getAllFilesByExt(project, ext, GlobalSearchScope.projectScope(project))) {
+                    applyToDoc(vf) { replaceClassNames(it, classMap) }
                 }
-            })
+            }
+            project.baseDir?.let { baseDir ->
+                VfsUtilCore.visitChildrenRecursively(baseDir, object : com.intellij.openapi.vfs.VirtualFileVisitor<Void>() {
+                    override fun visitFile(f: VirtualFile): Boolean {
+                        if (!f.isDirectory && f.name in setOf("proguard-rules.pro", "proguard-rules.txt", "proguard.cfg")) {
+                            applyToDoc(f) { replaceClassNames(it, classMap) }
+                        }
+                        return true
+                    }
+                })
+            }
         }
 
         for (r in plan.fileRenames) {
@@ -110,51 +146,106 @@ class RefactorExecutor(private val project: Project) {
         )
     }
 
-    private fun tier(pkg: String) = when {
-        pkg.contains(".base") || pkg.contains(".core") || pkg.contains(".common") -> 0
-        else -> 1
+    private fun createClassTargets(renames: List<ComponentRename>): List<ClassTarget> =
+        ReadAction.compute<List<ClassTarget>, RuntimeException> {
+            val pointerManager = SmartPointerManager.getInstance(project)
+            renames.map { rename ->
+                val virtualFile = LocalFileSystem.getInstance().findFileByPath(rename.sourceFile)
+                val file = virtualFile?.let { PsiManager.getInstance(project).findFile(it) as? KtFile }
+                val declaration = file?.collectDescendantsOfType<KtClassOrObject>()?.firstOrNull {
+                    it.textRange.startOffset == rename.declarationOffset && it.name == rename.oldName
+                }
+                ClassTarget(rename, declaration?.let { pointerManager.createSmartPsiElementPointer(it) })
+            }
+        }
+
+    private fun createSymbolTargets(renames: List<SymbolRename>): List<SymbolTarget> =
+        ReadAction.compute<List<SymbolTarget>, RuntimeException> {
+            val pointerManager = SmartPointerManager.getInstance(project)
+            renames.map { rename ->
+                val declaration = findKotlinDeclaration(rename)
+                SymbolTarget(
+                    rename,
+                    declaration?.let { pointerManager.createSmartPsiElementPointer(it) },
+                )
+            }
+        }
+
+    private fun findKotlinDeclaration(rename: SymbolRename): PsiNamedElement? {
+        val virtualFile = LocalFileSystem.getInstance().findFileByPath(rename.sourceFile) ?: return null
+        val file = PsiManager.getInstance(project).findFile(virtualFile) as? KtFile ?: return null
+        return file.collectDescendantsOfType<KtNamedDeclaration>().firstOrNull { declaration ->
+            if (declaration.textRange.startOffset != rename.declarationOffset || declaration.name != rename.oldName) {
+                return@firstOrNull false
+            }
+            when (rename.kind) {
+                SymbolKind.FUNCTION -> declaration is KtNamedFunction
+                SymbolKind.PROPERTY, SymbolKind.FIELD ->
+                    declaration is KtProperty || declaration is KtParameter && declaration.hasValOrVar()
+                else -> false
+            }
+        }
     }
 
-    private fun renameClass(rename: ComponentRename) {
-        val psiClass = JavaPsiFacade.getInstance(project)
-            .findClass(rename.fqn, GlobalSearchScope.projectScope(project))
-            ?: throw IllegalStateException("Not found: ${rename.fqn}")
-        ApplicationManager.getApplication().invokeAndWait {
-            RenameProcessor(project, psiClass, rename.newName, false, false).run()
+    private fun renameClass(declaration: KtClassOrObject, newName: String) {
+        val action = {
+            ImmediateRenameProcessor(project, declaration, newName).run()
+        }
+        val application = ApplicationManager.getApplication()
+        if (application.isDispatchThread) action() else application.invokeAndWait(action)
+    }
+
+    /** Kotlin's rename processor force-enables preview when it also renames the source file. */
+    private class ImmediateRenameProcessor(
+        project: Project,
+        declaration: KtClassOrObject,
+        newName: String,
+    ) : RenameProcessor(project, declaration, newName, false, false) {
+        override fun isPreviewUsages(usages: Array<UsageInfo>): Boolean = false
+
+        /** Accept every related rename suggested by IntelliJ without showing its selection dialog. */
+        override fun showAutomaticRenamingDialog(renamer: AutomaticRenamer): Boolean {
+            for (element in renamer.elements) {
+                renamer.getNewName(element)?.let { suggestedName ->
+                    renamer.setRename(element, suggestedName)
+                }
+            }
+            return true
         }
     }
 
     // ─────── Universal symbol rename: ReferencesSearch + OverridingMethodsSearch ───────
-    private fun renameSymbol(rename: SymbolRename, log: MutableList<String>): Boolean {
+    private fun renameSymbol(
+        rename: SymbolRename,
+        element: PsiNamedElement?,
+        log: MutableList<String>,
+        overrideIndex: MutableMap<String, List<Rep>>,
+    ): Boolean {
         val tag = "${rename.oldName}->${rename.newName} [${rename.kind}]"
-        val vf = LocalFileSystem.getInstance().findFileByPath(rename.sourceFile)
-            ?: run { log.add("SKIP $tag: file not found ${rename.sourceFile}"); return false }
-        val pf = PsiManager.getInstance(project).findFile(vf)
-            ?: run { log.add("SKIP $tag: psi file null"); return false }
-        val name = rename.fqn.substringAfterLast('.')
-        val parentFqn = rename.fqn.substringBeforeLast('.')
 
         // Resolve by OLD name first. Only treat as "already renamed" when the old declaration is
         // truly gone — otherwise a same-named sibling elsewhere (e.g. an already-present
         // `setBindingV2` in another class or an override) would wrongly block a `setBinding` that
         // still needs renaming.
-        val element = findElement(pf, parentFqn, name, rename.kind)
         if (element == null) {
-            val already = findElement(pf, parentFqn, rename.newName, rename.kind) != null
-            log.add("SKIP $tag: " + if (already) "already renamed" else "decl not found in ${pf.name} (isKt=${pf is KtFile})")
+            log.add("SKIP $tag: declaration pointer is no longer valid in ${rename.sourceFile}")
             return false
         }
-        val current = (element as PsiNamedElement).name ?: ""
-        if (current == rename.newName || current.endsWith(rename.newName)) {
+        val current = element.name ?: ""
+        if (current == rename.newName) {
             log.add("SKIP $tag: current name '$current'"); return false
         }
 
-        val count = renameViaReferences(element, rename.newName)
+        val count = renameViaReferences(element, rename.newName, overrideIndex)
         log.add((if (count > 0) "OK   " else "NOOP ") + "$tag via ${element.javaClass.simpleName}: $count edit(s)")
         return count > 0
     }
 
-    private fun renameViaReferences(element: PsiNamedElement, newName: String): Int {
+    private fun renameViaReferences(
+        element: PsiNamedElement,
+        newName: String,
+        overrideIndex: MutableMap<String, List<Rep>>,
+    ): Int {
         val scope = GlobalSearchScope.projectScope(project)
         val oldName = element.name ?: return 0
         val reps = mutableListOf<Rep>()
@@ -184,7 +275,12 @@ class RefactorExecutor(private val project: Project) {
         // may miss some; but editing mid-collection would shift offsets already recorded in reps,
         // causing double-suffix on the override name and skipped super.x() calls. The single apply
         // loop below (dedup + descending offsets) handles everything safely.
-        collectKotlinOverrideReps(oldName, reps)
+        val enclosingFunction = (element as? KtNamedFunction)?.let {
+            PsiTreeUtil.getParentOfType(it, KtNamedFunction::class.java, true)
+        }
+        if (element is KtNamedFunction && enclosingFunction == null) {
+            reps.addAll(overrideIndex.remove(oldName).orEmpty())
+        }
 
         var count = 0
         val uniqueReps = reps.distinctBy { "${it.file}:${it.start}:${it.end}" }
@@ -224,31 +320,29 @@ class RefactorExecutor(private val project: Project) {
         return count
     }
 
-    // Record Kotlin `override fun oldName` name-identifiers into [reps] (no editing). Detection uses
-    // the K2 override graph (K2Analysis.overridesName) with a structural fallback. Routing through
-    // reps — rather than editing here — keeps every recorded offset in the file valid and lets the
-    // dedup in the apply loop collapse this with OverridingMethodsSearch's own decl, so the name is
-    // renamed exactly once.
-    private fun collectKotlinOverrideReps(oldName: String, reps: MutableList<Rep>) {
-        try {
-            for (vf in FilenameIndex.getAllFilesByExt(project, "kt", GlobalSearchScope.projectScope(project))) {
-                val ktFile = PsiManager.getInstance(project).findFile(vf) as? KtFile ?: continue
-                val fns = PsiTreeUtil.findChildrenOfType(ktFile, KtNamedFunction::class.java)
-                for (fn in fns) {
-                    if (fn.name != oldName) continue
-                    // Only rename overrides of a PROJECT-declared base. Skip overrides of external
-                    // SDK/library methods (e.g. handleOnBackPressed inside an anonymous
-                    // object : OnBackPressedCallback) — renaming them breaks the framework contract.
-                    if (!K2Analysis.overridesProjectDeclarationNamed(fn, oldName)) continue
-                    val nid = fn.nameIdentifier ?: continue
-                    val start = nid.textRange.startOffset
-                    // Skip if OverridingMethodsSearch already recorded this same declaration
-                    // (guard against the KtLightIdentifier vs source-identifier offset mismatch).
-                    if (reps.any { it.file == vf.path && it.start == start }) continue
-                    reps.add(Rep(vf.path, start, nid.textRange.endOffset))
+    /** Scans Kotlin files once and indexes project overrides for every selected function name. */
+    private fun buildKotlinOverrideIndex(oldNames: Set<String>): MutableMap<String, List<Rep>> {
+        if (oldNames.isEmpty()) return mutableMapOf()
+        return ReadAction.compute<MutableMap<String, List<Rep>>, RuntimeException> {
+            val result = mutableMapOf<String, MutableList<Rep>>()
+            try {
+                for (vf in FilenameIndex.getAllFilesByExt(project, "kt", GlobalSearchScope.projectScope(project))) {
+                    val ktFile = PsiManager.getInstance(project).findFile(vf) as? KtFile ?: continue
+                    for (fn in PsiTreeUtil.findChildrenOfType(ktFile, KtNamedFunction::class.java)) {
+                        val name = fn.name ?: continue
+                        if (name !in oldNames) continue
+                        if (!K2Analysis.overridesProjectDeclarationNamed(fn, name)) continue
+                        val identifier = fn.nameIdentifier ?: continue
+                        result.getOrPut(name) { mutableListOf() }.add(
+                            Rep(vf.path, identifier.textRange.startOffset, identifier.textRange.endOffset),
+                        )
+                    }
                 }
+            } catch (_: Exception) {}
+            result.mapValuesTo(mutableMapOf()) { (_, reps) ->
+                reps.distinctBy { "${it.file}:${it.start}:${it.end}" }
             }
-        } catch (_: Exception) {}
+        }
     }
 
     // ─────── Collect the elements to run ReferencesSearch on ───────

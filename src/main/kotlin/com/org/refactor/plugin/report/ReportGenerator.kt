@@ -18,10 +18,18 @@ class ReportGenerator {
         val timestamp = LocalDateTime.now()
             .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
         val report = buildString {
-            appendLine("# Android Refactor Report")
+            appendLine("# Project Refactor Report")
             appendLine()
             appendLine("**Generated:** $timestamp")
             appendLine("**Suffix:** `${plan.suffix}`")
+            appendLine("**Removed suffix:** `${plan.options.suffixToRemove}`")
+            val modules = plan.options.selectedModuleNames
+                ?.map(ModuleSelection::shortDisplayName)
+                ?.sorted()
+                ?.joinToString(", ")
+                ?: "All modules"
+            appendLine("**Modules:** `$modules`")
+            appendLine("**Options:** classes=${plan.options.refactorClasses}, functions=${plan.options.refactorFunctions}, variables=${plan.options.refactorVariables}, shuffleFunctions=${plan.options.shuffleFunctions}, shuffleVariables=${plan.options.shuffleVariables}")
             appendLine("**Duration:** ${execution.durationMs}ms")
             appendLine()
             appendLine("---")

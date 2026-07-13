@@ -24,7 +24,7 @@ class ProjectScanner(private val project: Project) {
     var debug = ScanDebug()
         private set
 
-    fun scan(): ProjectIndex {
+    fun scan(selectedModuleNames: Set<String>? = null): ProjectIndex {
         val fileIndex = ProjectFileIndex.getInstance(project)
         val debugErrors = mutableListOf<String>()
 
@@ -35,23 +35,44 @@ class ProjectScanner(private val project: Project) {
         val walkedDirs = mutableSetOf<String>()
 
         // Gather all roots
-        val roots = gatherRoots()
+        val roots = gatherRoots(selectedModuleNames)
         val rootPaths = roots.map { it.path }
 
         for (root in roots) {
             try {
-                walkRoot(root, kotlinFiles, javaFiles, xmlFiles, gradleBuildFiles, fileIndex, walkedDirs)
+                walkRoot(
+                    root,
+                    kotlinFiles,
+                    javaFiles,
+                    xmlFiles,
+                    gradleBuildFiles,
+                    fileIndex,
+                    walkedDirs,
+                    selectedModuleNames,
+                )
             } catch (e: Exception) {
                 debugErrors.add("${root.path}: ${e.message}")
             }
         }
 
-        // Fallback: plain File walk
-        if (kotlinFiles.isEmpty() && javaFiles.isEmpty() && xmlFiles.isEmpty()) {
-            val bp = project.basePath
-            if (bp != null) {
+        // Some Android Studio source-set modules expose roots that ProjectFileIndex marks as
+        // excluded or owned by a sibling `.main` module. Fall back to a path-based walk of the
+        // selected content roots so choosing one logical module never produces an empty scan.
+        if (selectedModuleNames != null && kotlinFiles.isEmpty()) {
+            for (root in roots) {
                 try {
-                    plainFileFallback(java.io.File(bp), kotlinFiles, javaFiles, xmlFiles)
+                    plainFileFallback(java.io.File(root.path), kotlinFiles, javaFiles, xmlFiles)
+                } catch (e: Exception) {
+                    debugErrors.add("Module fallback ${root.path}: ${e.message}")
+                }
+            }
+        } else if (
+            selectedModuleNames == null &&
+            kotlinFiles.isEmpty() && javaFiles.isEmpty() && xmlFiles.isEmpty()
+        ) {
+            project.basePath?.let { basePath ->
+                try {
+                    plainFileFallback(java.io.File(basePath), kotlinFiles, javaFiles, xmlFiles)
                 } catch (e: Exception) {
                     debugErrors.add("Fallback: ${e.message}")
                 }
@@ -73,20 +94,30 @@ class ProjectScanner(private val project: Project) {
 
         return ProjectIndex(
             modules = modules,
-            allKotlinFiles = kotlinFiles,
-            allJavaFiles = javaFiles,
-            allXmlFiles = xmlFiles,
-            manifestFiles = xmlFiles.filter { it.fileType == FileType.XML_MANIFEST },
-            navigationGraphs = xmlFiles.filter { it.fileType == FileType.XML_NAVIGATION },
+            allKotlinFiles = kotlinFiles.distinctBy { it.absolutePath },
+            allJavaFiles = javaFiles.distinctBy { it.absolutePath },
+            allXmlFiles = xmlFiles.distinctBy { it.absolutePath },
+            manifestFiles = xmlFiles.distinctBy { it.absolutePath }.filter { it.fileType == FileType.XML_MANIFEST },
+            navigationGraphs = xmlFiles.distinctBy { it.absolutePath }.filter { it.fileType == FileType.XML_NAVIGATION },
             gradleModules = gradleBuildFiles.map { it.parent?.name ?: "root" },
         )
     }
 
-    private fun gatherRoots(): List<VirtualFile> {
+    private fun gatherRoots(selectedModuleNames: Set<String>?): List<VirtualFile> {
         val result = mutableListOf<VirtualFile>()
+        val allModules = ModuleManager.getInstance(project).modules
+
+        if (selectedModuleNames != null) {
+            return allModules
+                .asSequence()
+                .filter { ModuleSelection.logicalName(it.name) in selectedModuleNames }
+                .flatMap { ModuleRootManager.getInstance(it).contentRoots.asSequence() }
+                .distinctBy { it.path }
+                .toList()
+        }
 
         // Module content roots
-        for (m in ModuleManager.getInstance(project).modules) {
+        for (m in allModules) {
             result.addAll(ModuleRootManager.getInstance(m).contentRoots.toList())
         }
         // Project content roots
@@ -108,10 +139,17 @@ class ProjectScanner(private val project: Project) {
         gradleBuildFiles: MutableList<VirtualFile>,
         fileIndex: ProjectFileIndex,
         walkedDirs: MutableSet<String>,
+        selectedModuleNames: Set<String>?,
     ) {
         VfsUtilCore.visitChildrenRecursively(root, object : VirtualFileVisitor<Void>() {
             override fun visitFile(file: VirtualFile): Boolean {
-                if (file.isDirectory) return true
+                if (file.isDirectory) {
+                    if (file.name in SKIPPED_DIRECTORIES) return false
+                    // For a selected logical module, its content roots are authoritative. Android
+                    // Studio may mark a parent module root as excluded because `.main` owns files.
+                    if (selectedModuleNames == null && fileIndex.isExcluded(file)) return false
+                    return walkedDirs.add(file.path)
+                }
                 val name = file.name
                 val ext = file.extension?.lowercase() ?: return true
                 val moduleName = fileIndex.getModuleForFile(file)?.name ?: "unknown"
@@ -208,5 +246,11 @@ class ProjectScanner(private val project: Project) {
             } catch (_: Exception) {}
         }
         return androidModules
+    }
+
+    private companion object {
+        val SKIPPED_DIRECTORIES = setOf(
+            "build", ".gradle", ".git", ".idea", "node_modules", "__pycache__",
+        )
     }
 }

@@ -7,6 +7,7 @@ data class SymbolInfo(
     val psiElementClass: String,
     val sourceFile: String,
     val lineNumber: Int,
+    val declarationOffset: Int,
     val isOverride: Boolean = false,
     val isAndroidCallback: Boolean = false,
     val parentClassFqn: String? = null,

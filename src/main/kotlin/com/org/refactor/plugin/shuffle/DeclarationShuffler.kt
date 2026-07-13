@@ -42,17 +42,25 @@ class DeclarationShuffler(private val project: Project) {
 
     private enum class Kind { PROP, FUNC, ANCHOR }
 
-    fun shuffle(filePaths: Collection<String>): Result {
+    fun shuffle(
+        filePaths: Collection<String>,
+        shuffleFunctions: Boolean = true,
+        shuffleVariables: Boolean = true,
+    ): Result {
         val ktPaths = filePaths.distinct().filter { it.endsWith(".kt") }
         var changed = 0
         for (path in ktPaths) {
-            try { if (shuffleFile(path)) changed++ } catch (_: Exception) {}
+            try {
+                if (shuffleFile(path, shuffleFunctions, shuffleVariables)) changed++
+            } catch (_: Exception) {}
         }
         return Result(changed, ktPaths.size)
     }
 
-    private fun shuffleFile(path: String): Boolean {
-        val edits = ReadAction.compute<List<Edit>, RuntimeException> { planEdits(path) }
+    private fun shuffleFile(path: String, shuffleFunctions: Boolean, shuffleVariables: Boolean): Boolean {
+        val edits = ReadAction.compute<List<Edit>, RuntimeException> {
+            planEdits(path, shuffleFunctions, shuffleVariables)
+        }
         if (edits.isEmpty()) return false
         val vf = LocalFileSystem.getInstance().findFileByPath(path) ?: return false
         val pf = PsiManager.getInstance(project).findFile(vf) ?: return false
@@ -69,27 +77,47 @@ class DeclarationShuffler(private val project: Project) {
         return true
     }
 
-    private fun planEdits(path: String): List<Edit> {
+    private fun planEdits(path: String, shuffleFunctions: Boolean, shuffleVariables: Boolean): List<Edit> {
         val vf = LocalFileSystem.getInstance().findFileByPath(path) ?: return emptyList()
         val ktFile = PsiManager.getInstance(project).findFile(vf) as? KtFile ?: return emptyList()
         val fileText = ktFile.text
         val edits = mutableListOf<Edit>()
+        planDeclarations(ktFile.declarations, fileText, edits, shuffleFunctions, shuffleVariables)
         for (klass in ktFile.declarations.filterIsInstance<KtClassOrObject>()) {
-            planClass(klass, fileText, edits)
+            planClass(klass, fileText, edits, shuffleFunctions, shuffleVariables)
         }
         return edits
     }
 
-    private fun planClass(klass: KtClassOrObject, fileText: String, edits: MutableList<Edit>) {
+    private fun planClass(
+        klass: KtClassOrObject,
+        fileText: String,
+        edits: MutableList<Edit>,
+        shuffleFunctions: Boolean,
+        shuffleVariables: Boolean,
+    ) {
         val members = klass.body?.declarations ?: return
+        planDeclarations(members, fileText, edits, shuffleFunctions, shuffleVariables)
+        for (nested in members.filterIsInstance<KtClassOrObject>()) {
+            planClass(nested, fileText, edits, shuffleFunctions, shuffleVariables)
+        }
+    }
+
+    private fun planDeclarations(
+        members: List<KtDeclaration>,
+        fileText: String,
+        edits: MutableList<Edit>,
+        shuffleFunctions: Boolean,
+        shuffleVariables: Boolean,
+    ) {
         if (members.size < 2) return
         val n = members.size
         var i = 0
         while (i < n) {
-            val kind = kindOf(members[i])
+            val kind = kindOf(members[i], shuffleFunctions, shuffleVariables)
             if (kind == Kind.ANCHOR) { i++; continue }
             var j = i
-            while (j < n && kindOf(members[j]) == kind) j++
+            while (j < n && kindOf(members[j], shuffleFunctions, shuffleVariables) == kind) j++
             if (j - i >= 2) planRun(members.subList(i, j).toList(), kind, fileText)?.let { edits.add(it) }
             i = j
         }
@@ -159,10 +187,10 @@ class DeclarationShuffler(private val project: Project) {
         return Edit(start, end, sb.toString())
     }
 
-    private fun kindOf(d: KtDeclaration): Kind = when {
+    private fun kindOf(d: KtDeclaration, shuffleFunctions: Boolean, shuffleVariables: Boolean): Kind = when {
         isAnchor(d) -> Kind.ANCHOR
-        d is KtProperty -> Kind.PROP
-        d is KtNamedFunction -> Kind.FUNC
+        d is KtProperty && shuffleVariables -> Kind.PROP
+        d is KtNamedFunction && shuffleFunctions -> Kind.FUNC
         else -> Kind.ANCHOR
     }
 

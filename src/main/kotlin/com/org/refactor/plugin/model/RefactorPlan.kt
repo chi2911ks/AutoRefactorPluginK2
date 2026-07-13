@@ -1,14 +1,18 @@
 package com.org.refactor.plugin.model
 
 data class RefactorPlan(
-    val suffix: String,
+    val options: RefactorOptions,
     val componentRenames: List<ComponentRename>,
     val symbolRenames: List<SymbolRename>,
     val fileRenames: List<FileRename>,
+    val shuffleFilePaths: List<String>,
     val totalClasses: Int,
     val totalSymbols: Int,
     val totalReferences: Int,
-)
+) {
+    val suffix: String
+        get() = options.suffixToAdd
+}
 
 data class ComponentRename(
     val oldName: String,
@@ -16,6 +20,7 @@ data class ComponentRename(
     val fqn: String,
     val componentType: ComponentType,
     val sourceFile: String,
+    val declarationOffset: Int,
     val checked: Boolean = true,
 )
 
@@ -25,6 +30,8 @@ data class SymbolRename(
     val fqn: String,
     val kind: SymbolKind,
     val sourceFile: String,
+    val declarationOffset: Int,
+    val ownerScope: String,
     val checked: Boolean = true,
 )
 
