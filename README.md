@@ -5,16 +5,20 @@ An IntelliJ IDEA / Android Studio plugin for applying suffix-based renames acros
 ## Features
 
 - Independently refactor classes, functions, and variables.
+- Refactor Kotlin typealiases independently while preserving their expanded type unless class refactor also renames it.
+- Refactor `drawable*` and `layout*` resources, including qualifier variants, while updating Kotlin/Java `R` references and XML references.
+- Update Kotlin View Binding imports and type usages from renamed layouts; generated files under `build/` are never edited.
+- Preview string, color, and style names from every `values-*` variant; update their `R.*` and `@type/*` references without changing values or filenames.
 - Limit scan, preview, refactor, and shuffle targets to one or more selected modules, or use all modules.
 - Group IntelliJ source-set modules such as `app.main` and `app.test` under the logical `app` module.
 - Discover top-level classes plus top-level, member, nested-scope, and local functions and variables.
 - Refactor only top-level class-like declarations, including classes, interfaces, objects, enum classes, and annotations. Nested classes and enum entries are never renamed.
 - Exclude function parameters, generated sources, read-only declarations, and SDK/library overrides.
-- Remove an optional existing suffix before adding the new suffix. For example, `MainActivityInv124` can become `MainActivityInv125`.
+- Remove optional text anywhere in a name, case-insensitively, before adding the new suffix. For example, `CoreINV069Adapter` can become `CoreAdapterINV125`.
 - Independently shuffle function and property declaration order while preserving anchors and property dependency blocks.
 - Preview planned renames and conflicts before execution.
 
-The default selection refactors classes only. Function, variable, and shuffle options are opt-in each time the dialog opens.
+The default selection refactors classes, typealiases, drawables, layouts, strings, colors, and styles. Uncheck individual value resources in preview to exclude them. Function, variable, and shuffle options are opt-in.
 
 ## Prerequisites
 
@@ -54,9 +58,9 @@ Launch a sandbox IDE with:
 1. Open a Kotlin project and wait for indexing to finish.
 2. Select **Tools → Kotlin Project Refactor (K2)**.
 3. Select **All modules** or use Ctrl/Shift to select multiple project modules.
-4. Enter the suffix to add and, optionally, the existing suffix to remove.
+4. Enter the suffix to add and, optionally, the text to remove from names.
 5. Select refactor and shuffle operations, then click **Scan Project**.
-6. Review classes, symbols, shuffle targets, and conflicts.
+6. Review classes, typealiases, symbols, resources, shuffle targets, and conflicts.
 7. Click **OK** to execute the valid plan.
 
 Class renames run immediately after confirmation in the plugin dialog; IntelliJ's secondary Find/Refactoring Preview is disabled.

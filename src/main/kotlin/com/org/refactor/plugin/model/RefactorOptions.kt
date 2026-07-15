@@ -8,11 +8,19 @@ data class RefactorOptions(
     val refactorClasses: Boolean = true,
     val refactorFunctions: Boolean = false,
     val refactorVariables: Boolean = false,
+    val refactorTypeAliases: Boolean = true,
+    val refactorStrings: Boolean = true,
+    val refactorColors: Boolean = true,
+    val refactorStyles: Boolean = true,
+    val refactorDrawables: Boolean = true,
+    val refactorLayouts: Boolean = true,
     val shuffleFunctions: Boolean = false,
     val shuffleVariables: Boolean = false,
 ) {
     val hasRefactorOperation: Boolean
-        get() = refactorClasses || refactorFunctions || refactorVariables
+        get() = refactorClasses || refactorFunctions || refactorVariables || refactorTypeAliases ||
+            refactorStrings || refactorColors || refactorStyles ||
+            refactorDrawables || refactorLayouts
 
     val hasShuffleOperation: Boolean
         get() = shuffleFunctions || shuffleVariables

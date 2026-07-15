@@ -11,12 +11,16 @@ import org.junit.jupiter.api.Test
 class RefactorPlanGeneratorTest {
 
     @Test
-    fun `defaults to class refactor only`() {
+    fun `defaults to class and resource refactor`() {
         val options = RefactorOptions(suffixToAdd = "Ref")
 
         assertTrue(options.refactorClasses)
         assertFalse(options.refactorFunctions)
         assertFalse(options.refactorVariables)
+        assertTrue(options.refactorTypeAliases)
+        assertTrue(options.refactorStrings)
+        assertTrue(options.refactorDrawables)
+        assertTrue(options.refactorLayouts)
         assertFalse(options.hasShuffleOperation)
         assertEquals(null, options.selectedModuleNames)
     }
@@ -39,6 +43,31 @@ class RefactorPlanGeneratorTest {
         )
 
         assertEquals("MainActivityInv125", generator.transformName("MainActivityInv125"))
+    }
+
+    @Test
+    fun `removes all matching text anywhere without case sensitivity`() {
+        val generator = RefactorPlanGenerator(
+            RefactorOptions(suffixToAdd = "INV125", suffixToRemove = "inv069"),
+        )
+
+        assertEquals(
+            "CoreRecyclerAdapterINV125",
+            generator.transformName("CoreRecyclerINV069Adapter"),
+        )
+        assertEquals(
+            "CoreAdapterINV125",
+            generator.transformName("CoreInv069INV069Adapter"),
+        )
+    }
+
+    @Test
+    fun `target suffix check ignores case`() {
+        val generator = RefactorPlanGenerator(
+            RefactorOptions(suffixToAdd = "INV125", suffixToRemove = "inv069"),
+        )
+
+        assertEquals("CoreAdapterinv125", generator.transformName("CoreAdapterinv125"))
     }
 
     @Test
@@ -70,6 +99,12 @@ class RefactorPlanGeneratorTest {
         val options = RefactorOptions(
             suffixToAdd = "",
             refactorClasses = false,
+            refactorTypeAliases = false,
+            refactorStrings = false,
+            refactorColors = false,
+            refactorStyles = false,
+            refactorDrawables = false,
+            refactorLayouts = false,
             shuffleFunctions = true,
         )
 

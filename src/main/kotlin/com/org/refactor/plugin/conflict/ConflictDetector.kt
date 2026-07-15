@@ -52,9 +52,65 @@ class ConflictDetector(private val project: Project) {
         detectExternalReferences(plan, index, conflicts)
         detectKeywordConflicts(plan, conflicts)
         detectGeneratedCode(plan, conflicts)
+        detectResourceConflicts(plan, conflicts)
+        detectTypeAliasConflicts(plan, conflicts)
+        detectStringResourceConflicts(plan, conflicts)
 
         val hasErrors = conflicts.any { it.severity == ConflictSeverity.ERROR }
         return ConflictReport(conflicts = conflicts, isSafe = !hasErrors)
+    }
+
+    private fun detectStringResourceConflicts(
+        plan: RefactorPlan,
+        conflicts: MutableList<RefactorConflict>,
+    ) {
+        for (rename in plan.stringResourceRenames.filter { it.skipReason != null }) {
+            conflicts.add(
+                RefactorConflict(
+                    type = ConflictType.DUPLICATE_NAME,
+                    severity = ConflictSeverity.WARNING,
+                    message = "Skipping string '${rename.oldName}': ${rename.skipReason}",
+                    sourceFile = rename.variants.firstOrNull()?.sourceFile,
+                    symbolName = rename.oldName,
+                ),
+            )
+        }
+    }
+
+    private fun detectTypeAliasConflicts(
+        plan: RefactorPlan,
+        conflicts: MutableList<RefactorConflict>,
+    ) {
+        for (rename in plan.typeAliasRenames.filter { !it.checked }) {
+            conflicts.add(
+                RefactorConflict(
+                    type = ConflictType.DUPLICATE_NAME,
+                    severity = ConflictSeverity.WARNING,
+                    message = "Skipping typealias '${rename.oldName}': " +
+                        (rename.skipReason ?: "target is not safe to rename"),
+                    sourceFile = rename.sourceFile,
+                    symbolName = rename.oldName,
+                ),
+            )
+        }
+    }
+
+    private fun detectResourceConflicts(
+        plan: RefactorPlan,
+        conflicts: MutableList<RefactorConflict>,
+    ) {
+        for (rename in plan.resourceRenames.filter { !it.checked }) {
+            conflicts.add(
+                RefactorConflict(
+                    type = ConflictType.DUPLICATE_NAME,
+                    severity = ConflictSeverity.WARNING,
+                    message = "Skipping ${rename.type.name.lowercase()} '${rename.oldName}': " +
+                        (rename.skipReason ?: "resource is not safe to rename"),
+                    sourceFile = rename.variants.firstOrNull()?.oldPath,
+                    symbolName = rename.oldName,
+                ),
+            )
+        }
     }
 
     private fun detectExistingTargets(

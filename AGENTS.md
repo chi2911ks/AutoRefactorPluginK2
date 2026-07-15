@@ -2,28 +2,28 @@
 
 ## Project Structure & Module Organization
 
-This Kotlin refactoring plugin targets IntelliJ IDEA and Android Studio. Code lives under `src/main/kotlin/com/org/refactor/plugin/`, organized by workflow stage. The entry point is `AndroidRefactorAction.kt`; IDE registration is in `src/main/resources/META-INF/plugin.xml`.
+Plugin code lives under `src/main/kotlin/com/org/refactor/plugin/`. `AndroidRefactorAction.kt` is the entry point; registration is in `src/main/resources/META-INF/plugin.xml`.
 
-Place tests in `src/test/kotlin/`, mirroring production packages. Keep generated artifacts and IDE sandboxes under uncommitted `build/`.
+Mirror packages under `src/test/kotlin/`. Never commit `build/` artifacts.
 
 ## Build, Test, and Development Commands
 
-Use JDK 21 and the Gradle wrapper. On Windows, use `gradlew.bat`.
+Use JDK 21 and Gradle wrapper (`gradlew.bat` on Windows).
 
 - `./gradlew buildPlugin` builds the ZIP in `build/distributions/`.
 - `./gradlew runIde` launches a sandbox IDE.
 - `./gradlew test` runs the JUnit 5 test suite.
-- `./gradlew check` runs all verification tasks.
+- `./gradlew check` runs verification tasks.
 
 ## Coding Style & Naming Conventions
 
-Follow `kotlin.code.style=official`: four-space indentation, no tabs, and idiomatic null-safety. Use `PascalCase` for classes/objects, `camelCase` for functions/properties, and lowercase packages. Name files after their primary declaration, for example `ConflictDetector.kt`.
+Follow `kotlin.code.style=official`: four spaces, no tabs, and idiomatic null-safety. Use `PascalCase` for types, `camelCase` for functions/properties, and lowercase packages.
 
 ## Refactor Behavior
 
-Scanning is Kotlin-only. Rename only top-level classes and objects; never rename nested declarations or enum entries. Class rename is enabled by default. Function and variable rename, plus declaration shuffling, are explicit checkbox options; parameters are never independent rename targets. Suffix removal (for example, `Inv124`) is shared by all enabled rename kinds.
+Symbol scanning is Kotlin-only. Rename top-level classes/objects, never nested declarations or enum entries. Classes, typealiases, drawables, and layouts are enabled by default. Typealiases rename their identifiers; class refactoring may update expanded types. Functions, variables, and shuffling are opt-in; parameters are never targets. Remove text case-insensitively before appending suffixes. Resource names use lowercase `_segments`; collapse duplicate underscores. Rename qualifier variants together, skip `mipmap`, and update View Binding without generated edits. Strings, colors, and styles default selected and rename across variants with target prefix.
 
-The module picker supports multiple logical Gradle modules and groups source sets such as `app.main` under `app`. Keep "All modules" equivalent to selecting every logical module.
+The module picker groups source sets such as `app.main` under `app`. Keep "All modules" equivalent to selecting modules.
 
 ## Architecture Safety Rules
 
@@ -31,10 +31,12 @@ Centralize K2 Analysis API calls in `psi/K2Analysis.kt`. Resolve targets by `Sym
 
 Keep scans and plan preparation in background tasks. Run PSI mutation and `RenameProcessor` work on EDT/write-intent context. `ImmediateRenameProcessor` must suppress usage preview and automatically accept every IntelliJ related-rename suggestion; do not reintroduce confirmation dialogs. Avoid per-symbol project scans: build shared indexes once and verify only affected files.
 
+Resource replacements must be contextual (`R.layout`, `R.drawable`, `@layout`, `@drawable`) and run with qualifier file renames in one write command. Skip the whole logical resource on collision or read-only variants.
+
 ## Testing Guidelines
 
 Tests use JUnit Jupiter 5.10. Name classes `*Test`; cover conflicts, module grouping, SDK overrides, accessor collisions, and idempotent reruns. Validate IDE behavior with `runIde` and inspect `.autorefactor-symbols.log` when diagnosing renames.
 
 ## Commit & Pull Request Guidelines
 
-Use short, imperative commit subjects and keep each commit to one logical change. Pull requests should describe behavior, list verification, and link issues. Include screenshots for UI changes and note IntelliJ or K2 compatibility changes.
+Use imperative commit subjects and one change per commit. Pull requests should describe behavior and verification, link issues, include UI screenshots, and note compatibility changes.

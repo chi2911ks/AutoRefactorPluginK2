@@ -31,6 +31,7 @@ class ProjectScanner(private val project: Project) {
         val kotlinFiles = mutableListOf<SourceFile>()
         val javaFiles = mutableListOf<SourceFile>()
         val xmlFiles = mutableListOf<SourceFile>()
+        val resourceFiles = mutableListOf<AndroidResourceFile>()
         val gradleBuildFiles = mutableListOf<VirtualFile>()
         val walkedDirs = mutableSetOf<String>()
 
@@ -45,6 +46,7 @@ class ProjectScanner(private val project: Project) {
                     kotlinFiles,
                     javaFiles,
                     xmlFiles,
+                    resourceFiles,
                     gradleBuildFiles,
                     fileIndex,
                     walkedDirs,
@@ -61,7 +63,7 @@ class ProjectScanner(private val project: Project) {
         if (selectedModuleNames != null && kotlinFiles.isEmpty()) {
             for (root in roots) {
                 try {
-                    plainFileFallback(java.io.File(root.path), kotlinFiles, javaFiles, xmlFiles)
+                    plainFileFallback(java.io.File(root.path), kotlinFiles, javaFiles, xmlFiles, resourceFiles)
                 } catch (e: Exception) {
                     debugErrors.add("Module fallback ${root.path}: ${e.message}")
                 }
@@ -72,7 +74,7 @@ class ProjectScanner(private val project: Project) {
         ) {
             project.basePath?.let { basePath ->
                 try {
-                    plainFileFallback(java.io.File(basePath), kotlinFiles, javaFiles, xmlFiles)
+                    plainFileFallback(java.io.File(basePath), kotlinFiles, javaFiles, xmlFiles, resourceFiles)
                 } catch (e: Exception) {
                     debugErrors.add("Fallback: ${e.message}")
                 }
@@ -100,6 +102,7 @@ class ProjectScanner(private val project: Project) {
             manifestFiles = xmlFiles.distinctBy { it.absolutePath }.filter { it.fileType == FileType.XML_MANIFEST },
             navigationGraphs = xmlFiles.distinctBy { it.absolutePath }.filter { it.fileType == FileType.XML_NAVIGATION },
             gradleModules = gradleBuildFiles.map { it.parent?.name ?: "root" },
+            androidResourceFiles = resourceFiles.distinctBy { it.absolutePath },
         )
     }
 
@@ -136,6 +139,7 @@ class ProjectScanner(private val project: Project) {
         kotlinFiles: MutableList<SourceFile>,
         javaFiles: MutableList<SourceFile>,
         xmlFiles: MutableList<SourceFile>,
+        resourceFiles: MutableList<AndroidResourceFile>,
         gradleBuildFiles: MutableList<VirtualFile>,
         fileIndex: ProjectFileIndex,
         walkedDirs: MutableSet<String>,
@@ -153,6 +157,7 @@ class ProjectScanner(private val project: Project) {
                 val name = file.name
                 val ext = file.extension?.lowercase() ?: return true
                 val moduleName = fileIndex.getModuleForFile(file)?.name ?: "unknown"
+                AndroidResourceParser.parse(file.path, moduleName)?.let(resourceFiles::add)
 
                 when (ext) {
                     "kt" -> kotlinFiles.add(SourceFile(
@@ -190,6 +195,7 @@ class ProjectScanner(private val project: Project) {
         kotlinFiles: MutableList<SourceFile>,
         javaFiles: MutableList<SourceFile>,
         xmlFiles: MutableList<SourceFile>,
+        resourceFiles: MutableList<AndroidResourceFile>,
     ) {
         val stack = ArrayDeque<java.io.File>()
         stack.add(base)
@@ -212,6 +218,7 @@ class ProjectScanner(private val project: Project) {
                         virtualFilePath = absPath, absolutePath = absPath,
                         moduleName = "unknown", fileType = FileType.OTHER
                     )
+                    AndroidResourceParser.parse(absPath, inferModuleName(absPath))?.let(resourceFiles::add)
                     when (ext) {
                         "kt" -> kotlinFiles.add(sf.copy(fileType = FileType.KOTLIN))
                         "java" -> javaFiles.add(sf.copy(fileType = FileType.JAVA))
@@ -229,6 +236,11 @@ class ProjectScanner(private val project: Project) {
                 }
             }
         }
+    }
+
+    private fun inferModuleName(path: String): String {
+        val beforeSource = path.replace('\\', '/').substringBeforeLast("/src/", missingDelimiterValue = "")
+        return beforeSource.substringAfterLast('/').ifEmpty { "unknown" }
     }
 
     private fun detectAndroidModules(buildFiles: List<VirtualFile>): Set<String> {

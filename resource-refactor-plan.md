@@ -71,3 +71,84 @@ Resource suffix luôn là một segment lowercase, nối bằng `_`. Chỉ loạ
 - Chỉ hỗ trợ View Binding, dùng tên PascalCase chuẩn sinh từ layout.
 - Cập nhật usages trên toàn project, kể cả module không được chọn.
 - Collision làm bỏ qua toàn bộ logical resource và được báo trong preview/report.
+
+## Mở rộng tiếp theo: Các loại resource khác
+
+Ngày mai mở rộng refactor cho mọi file-based resource trực tiếp dưới `res/<type>` và các qualifier directory tương ứng. Tiếp tục loại trừ hoàn toàn:
+
+- `values*`
+- `font*`
+- `mipmap*`
+- `raw*`
+
+Phạm vi dự kiến bao gồm `drawable*`, `layout*`, `anim*`, `animator*`, `color*`, `menu*`, `navigation*`, `transition*`, `xml*`, `interpolator*` và các loại file-based resource hợp lệ khác không nằm trong danh sách loại trừ.
+
+Giữ nguyên các quy tắc hiện có:
+
+- Gom mọi qualifier variant cùng module/type/tên thành một logical resource và đổi cùng nhau.
+- Dùng suffix chung, tự lowercase, chỉ loại suffix cuối khớp chính xác rồi nối suffix mới bằng `_`.
+- Cập nhật references trên toàn project theo đúng type, ví dụ `R.menu.main_menu`, `@menu/main_menu`, `R.navigation.main_nav` và `@navigation/main_nav`.
+- Không đổi tên file trong `values*`, nhưng vẫn cập nhật resource references nằm bên trong các file này.
+- Nếu target tồn tại hoặc một variant read-only, bỏ qua toàn bộ logical resource và báo trong preview/report.
+- Không sửa generated sources.
+
+### Câu hỏi cần xác nhận trước khi triển khai
+
+Không còn câu hỏi chặn triển khai. Các quyết định mới đã được xác nhận:
+
+1. Scanner thu thập mọi logical resource hợp lệ rồi hiển thị trong tab `Resources`. Bảng preview có cột checkbox để người dùng chọn từng resource cần đổi; một checkbox điều khiển toàn bộ qualifier variants của dòng đó. Resources mặc định chưa được chọn.
+2. Tự động hỗ trợ cả loại file-based resource mới nếu directory không thuộc `values*`, `font*`, `mipmap*`, `raw*`.
+3. Không đổi tên file trong `values*`, nhưng vẫn cập nhật references bên trong chúng khi resource được chọn đổi tên.
+4. Với `navigation`, chỉ đổi file cùng `R.navigation`/`@navigation` references; không chủ động đổi Safe Args generated classes như `MainNavDirections`.
+
+### Điều chỉnh implementation hiện tại
+
+- Tổng quát hóa `AndroidResourceType` để lưu directory type động thay vì chỉ `DRAWABLE`/`LAYOUT`.
+- Thay regex cố định `layout|drawable` bằng lookup type đã scan, nhưng chỉ thay reference có ngữ cảnh `R.<type>.<name>` hoặc `@<type>/<name>`.
+- Đổi resource preview từ `JTable` chỉ đọc sang table model có cột Boolean editable; khi selection thay đổi, cập nhật `ResourceRename.checked` trước execution.
+- Phân biệt `checked=false` do người dùng không chọn với resource bị khóa do collision/read-only; dòng bị conflict không cho tick.
+- View Binding mapping chỉ áp dụng cho resource type `layout`; các type khác không tạo binding mapping.
+- Report phân biệt `selected`, `not selected` và `skipped by conflict`.
+- Áp dụng quy tắc `Text to remove` dùng chung trong `refactor-options-expansion-plan.md`: xóa mọi occurrence không phân biệt hoa/thường, dọn/gộp `_`, rồi thêm suffix lowercase nếu tên chưa kết thúc bằng suffix đích.
+
+## String Resource Prefix Refactor
+
+Mở rộng scanner cho riêng `<string name="...">` trong mọi `values*` directory. Không đổi filename `strings.xml` và không refactor `<string-array>` hoặc `<plurals>`.
+
+String key dùng quy tắc prefix riêng:
+
+1. Xóa mọi occurrence của `Text to remove` ở bất kỳ vị trí nào, không phân biệt hoa/thường.
+2. Dọn `_` ở hai đầu và gộp nhiều `_` liên tiếp thành một.
+3. Chuẩn hóa prefix mới từ suffix add thành lowercase.
+4. Nếu key sau khi dọn chưa bắt đầu bằng prefix mới, thêm `<prefix>_` ở đầu. Nếu đã có prefix mới thì không thêm lần hai.
+5. Nếu text cũ không xuất hiện, vẫn thêm prefix mới.
+
+Ví dụ remove `inv069`, add `inv125`:
+
+```text
+inv069_tv_content_splash_01 -> inv125_tv_content_splash_01
+tv_inv069_content           -> inv125_tv_content
+tv_content                  -> inv125_tv_content
+inv125_tv_content           -> inv125_tv_content
+```
+
+Nhóm mọi locale/country variant cùng key thành một logical string resource, ví dụ `values/`, `values-ja/`, `values-vi/`, `values-en-rUS/`. Một checkbox preview mặc định được tích và điều khiển toàn bộ variants; người dùng bỏ tích để loại key khỏi lần refactor.
+
+Cập nhật references trên toàn project:
+
+- `R.string.old_name` -> `R.string.new_name`
+- `@string/old_name` -> `@string/new_name`
+
+Nếu key đích tồn tại trong bất kỳ `values*` variant nào của cùng module, khóa checkbox, bỏ qua toàn bộ logical key và báo conflict trong preview/report. Không sửa nội dung dịch của string.
+
+Áp dụng cùng preview và tính nguyên tử cho `<color>` và `<style>`, với option riêng mặc định bật. Style giữ nguyên casing và phân cấp dấu chấm, ví dụ `AppTheme.AdAttribution` -> `inv125_AppTheme.AdAttribution`; cập nhật cả `R.color`, `@color`, `R.style`, `@style` và style parent references.
+
+### Tests cần bổ sung
+
+- Prefix cũ ở đầu, giữa, cuối, xuất hiện nhiều lần và khác hoa/thường.
+- Key không có prefix cũ vẫn nhận prefix mới.
+- Key đã có prefix mới không bị thêm lần hai.
+- Group/rename đồng thời mọi locale variants.
+- Collision ở một locale làm skip toàn bộ logical key.
+- Chỉ `<string>` được đổi; `string-array`, `plurals` và filename giữ nguyên.
+- Kotlin/Java/XML references được cập nhật.

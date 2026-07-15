@@ -28,6 +28,7 @@ import org.jetbrains.kotlin.psi.KtNamedDeclaration
 import org.jetbrains.kotlin.psi.KtNamedFunction
 import org.jetbrains.kotlin.psi.KtParameter
 import org.jetbrains.kotlin.psi.KtProperty
+import org.jetbrains.kotlin.psi.KtTypeAlias
 import org.jetbrains.kotlin.psi.psiUtil.collectDescendantsOfType
 import org.jetbrains.kotlin.psi.psiUtil.containingClassOrObject
 
@@ -42,10 +43,17 @@ class RefactorExecutor(private val project: Project) {
         val rename: ComponentRename,
         val pointer: SmartPsiElementPointer<KtClassOrObject>?,
     )
+    private data class TypeAliasTarget(
+        val rename: TypeAliasRename,
+        val pointer: SmartPsiElementPointer<KtTypeAlias>?,
+    )
 
     data class ExecutionResult(
         val success: Boolean, val classesRenamed: Int, val symbolsRenamed: Int,
         val referencesUpdated: Int, val filesRenamed: Int,
+        val drawablesRenamed: Int = 0, val layoutsRenamed: Int = 0,
+        val typeAliasesRenamed: Int = 0,
+        val stringsRenamed: Int = 0,
         val errors: List<String>, val warnings: List<String>, val durationMs: Long,
     )
 
@@ -70,17 +78,33 @@ class RefactorExecutor(private val project: Project) {
         val errors = mutableListOf<String>()
         val warnings = mutableListOf<String>()
         var classesRenamed = 0; var symbolsRenamed = 0; var filesRenamed = 0
+        var typeAliasesRenamed = 0
+        var stringsRenamed = 0
+        var referencesUpdated = 0; var drawablesRenamed = 0; var layoutsRenamed = 0
         val symbolLog = mutableListOf<String>()   // per-symbol diagnostic trace
 
         val unchecked = plan.componentRenames.filter { it.checked }
         val classTargets = createClassTargets(unchecked)
         val symbolTargets = createSymbolTargets(plan.symbolRenames.filter { it.checked })
+        val typeAliasTargets = createTypeAliasTargets(plan.typeAliasRenames.filter { it.checked })
+
         val overrideIndex = buildKotlinOverrideIndex(
             symbolTargets.asSequence()
                 .filter { it.rename.kind == SymbolKind.FUNCTION }
                 .map { it.rename.oldName }
                 .toSet(),
         )
+        for (target in typeAliasTargets) {
+            val rename = target.rename
+            try {
+                val declaration = target.pointer?.element
+                    ?: throw IllegalStateException("Typealias declaration not found: ${rename.fqn}")
+                renameTypeAlias(declaration, rename.newName)
+                typeAliasesRenamed++
+            } catch (e: Exception) {
+                errors.add("${rename.oldName}: ${e.message}")
+            }
+        }
         for (target in symbolTargets) {
             val symbol = target.rename
             try {
@@ -129,6 +153,19 @@ class RefactorExecutor(private val project: Project) {
                 if (vf.parent?.findChild(r.newFileName) == null) { vf.rename(this, r.newFileName); filesRenamed++ }
             } catch (_: Exception) {}
         }
+
+        // Resource text changes can shift arbitrary Kotlin offsets, so apply them only after all
+        // symbol/class pointer-based refactorings are complete.
+        val resourceResult = ResourceRefactorExecutor(project).execute(plan.resourceRenames)
+        drawablesRenamed = resourceResult.drawablesRenamed
+        layoutsRenamed = resourceResult.layoutsRenamed
+        filesRenamed += resourceResult.filesRenamed
+        referencesUpdated += resourceResult.referencesUpdated
+        warnings.addAll(resourceResult.warnings)
+        val stringResult = StringResourceRefactorExecutor(project).execute(plan.stringResourceRenames)
+        stringsRenamed = stringResult.stringsRenamed
+        referencesUpdated += stringResult.referencesUpdated
+        warnings.addAll(stringResult.warnings)
         VirtualFileManager.getInstance().syncRefresh()
 
         // Diagnostic trace — one line per symbol (renamed / skipped-with-reason / failed).
@@ -140,8 +177,11 @@ class RefactorExecutor(private val project: Project) {
 
         return ExecutionResult(
             success = errors.isEmpty(), classesRenamed = classesRenamed,
-            symbolsRenamed = symbolsRenamed, referencesUpdated = 0,
+            symbolsRenamed = symbolsRenamed, referencesUpdated = referencesUpdated,
             filesRenamed = filesRenamed, errors = errors, warnings = warnings,
+            drawablesRenamed = drawablesRenamed, layoutsRenamed = layoutsRenamed,
+            typeAliasesRenamed = typeAliasesRenamed,
+            stringsRenamed = stringsRenamed,
             durationMs = System.currentTimeMillis() - startTime,
         )
     }
@@ -171,6 +211,22 @@ class RefactorExecutor(private val project: Project) {
             }
         }
 
+    private fun createTypeAliasTargets(renames: List<TypeAliasRename>): List<TypeAliasTarget> =
+        ReadAction.compute<List<TypeAliasTarget>, RuntimeException> {
+            val pointerManager = SmartPointerManager.getInstance(project)
+            renames.map { rename ->
+                val virtualFile = LocalFileSystem.getInstance().findFileByPath(rename.sourceFile)
+                val file = virtualFile?.let { PsiManager.getInstance(project).findFile(it) as? KtFile }
+                val declaration = file?.collectDescendantsOfType<KtTypeAlias>()?.firstOrNull {
+                    it.textRange.startOffset == rename.declarationOffset && it.name == rename.oldName
+                }
+                TypeAliasTarget(
+                    rename,
+                    declaration?.let { pointerManager.createSmartPsiElementPointer(it) },
+                )
+            }
+        }
+
     private fun findKotlinDeclaration(rename: SymbolRename): PsiNamedElement? {
         val virtualFile = LocalFileSystem.getInstance().findFileByPath(rename.sourceFile) ?: return null
         val file = PsiManager.getInstance(project).findFile(virtualFile) as? KtFile ?: return null
@@ -188,8 +244,20 @@ class RefactorExecutor(private val project: Project) {
     }
 
     private fun renameClass(declaration: KtClassOrObject, newName: String) {
+        runImmediateRename(declaration, newName, acceptRelatedRenames = true)
+    }
+
+    private fun renameTypeAlias(declaration: KtTypeAlias, newName: String) {
+        runImmediateRename(declaration, newName, acceptRelatedRenames = false)
+    }
+
+    private fun runImmediateRename(
+        declaration: PsiElement,
+        newName: String,
+        acceptRelatedRenames: Boolean,
+    ) {
         val action = {
-            ImmediateRenameProcessor(project, declaration, newName).run()
+            ImmediateRenameProcessor(project, declaration, newName, acceptRelatedRenames).run()
         }
         val application = ApplicationManager.getApplication()
         if (application.isDispatchThread) action() else application.invokeAndWait(action)
@@ -198,13 +266,15 @@ class RefactorExecutor(private val project: Project) {
     /** Kotlin's rename processor force-enables preview when it also renames the source file. */
     private class ImmediateRenameProcessor(
         project: Project,
-        declaration: KtClassOrObject,
+        declaration: PsiElement,
         newName: String,
+        private val acceptRelatedRenames: Boolean,
     ) : RenameProcessor(project, declaration, newName, false, false) {
         override fun isPreviewUsages(usages: Array<UsageInfo>): Boolean = false
 
         /** Accept every related rename suggested by IntelliJ without showing its selection dialog. */
         override fun showAutomaticRenamingDialog(renamer: AutomaticRenamer): Boolean {
+            if (!acceptRelatedRenames) return false
             for (element in renamer.elements) {
                 renamer.getNewName(element)?.let { suggestedName ->
                     renamer.setRename(element, suggestedName)

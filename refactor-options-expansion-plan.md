@@ -103,3 +103,69 @@ Mở rộng `DeclarationShuffler` nhận hai cờ `shuffleFunctions` và `shuffl
 Đã triển khai. Unit test bao phủ defaults, thay suffix, chống suffix kép, symbol rename độc lập với class và shuffle-only target selection.
 
 IntelliJ `RenameProcessor` được cấu hình không hiển thị secondary usage preview; bấm **OK** trong plugin là lần xác nhận duy nhất.
+
+## 9. Follow-up: Kotlin Typealias Refactor
+
+Thêm checkbox riêng `Refactor typealiases`, mặc định bật. Thu thập mọi Kotlin `typealias`, bao gồm alias của class, generic, collection và function type.
+
+Chỉ đổi identifier alias bên trái và cập nhật imports/usages trên toàn project. Không trực tiếp đổi expanded type bên phải trong thao tác typealias. Nếu class refactor cũng bật, class rename độc lập có thể cập nhật type bên phải, vì vậy cả hai phía được phép thay đổi trong cùng một lần chạy.
+
+Typealias dùng chung suffix add/remove và quy tắc case-sensitive của class. Ví dụ remove `Inv124`, add `Dn12`:
+
+```kotlin
+typealias ChapterAudioLaneInvInv124 = ChapterAudioLane
+```
+
+thành:
+
+```kotlin
+typealias ChapterAudioLaneInvDn12 = ChapterAudioLane
+```
+
+Thêm tab preview riêng `Typealiases`. Nếu tên alias đích đã tồn tại trong cùng package/file, bỏ qua item và báo conflict. Cập nhật references ở mọi module, kể cả module không được chọn làm target.
+
+### Implementation outline
+
+1. Thêm option mặc định bật và model plan bất biến cho typealias rename.
+2. Thu thập `KtTypeAlias` và giữ target bằng smart pointer.
+3. Sinh suffix transformation, collision, count và preview rows.
+4. Rename declaration/usages qua IntelliJ/Kotlin rename processing, không hiện secondary preview/dialog.
+5. Mở rộng verification/report/test cho generic/function alias, cross-module usage, collision, combined class rename và idempotent rerun.
+
+## 10. Follow-up: Remove Text Anywhere
+
+Đổi label `Existing suffix to remove` thành `Text to remove`. Giá trị này không còn chỉ khớp suffix cuối mà là literal text cần xóa ở mọi vị trí trước khi thêm suffix mới.
+
+Quy tắc dùng chung cho class/object, typealias, function, variable và mọi resource được chọn:
+
+1. Xóa tất cả occurrences, không phân biệt hoa/thường, nhưng giữ nguyên case của phần tên còn lại.
+2. Nếu text không xuất hiện, giữ nguyên tên gốc rồi thêm suffix mới như hiện tại.
+3. Sau khi xóa, nếu tên đã kết thúc bằng suffix mới (cũng so sánh không phân biệt hoa/thường), không thêm suffix lần hai.
+4. Kotlin identifiers nối suffix trực tiếp theo case người dùng nhập.
+5. Resource names chuẩn hóa remove/add text về lowercase, dọn `_` ở hai đầu và gộp nhiều `_` liên tiếp thành một trước khi nối `_<suffix>`.
+
+Ví dụ add `INV125`, remove `INV069`:
+
+```text
+CoreRecyclerINV069Adapter -> CoreRecyclerAdapterINV125
+CoreInv069Inv069Adapter   -> CoreAdapterINV125
+CoreRecyclerAdapter       -> CoreRecyclerAdapterINV125
+CoreRecyclerAdapterINV125 -> CoreRecyclerAdapterINV125
+```
+
+Ví dụ resource add `INV125`, remove `INV069`:
+
+```text
+inv069_bg_12_top  -> bg_12_top_inv125
+icon__inv069__bg  -> icon_bg_inv125
+bg_12_top         -> bg_12_top_inv125
+bg_12_top_inv125  -> bg_12_top_inv125
+```
+
+### Test cần bổ sung
+
+- Remove text ở đầu, giữa, cuối và xuất hiện nhiều lần.
+- Case-insensitive remove và giữ case phần còn lại.
+- Resource underscore cleanup.
+- Text không tồn tại vẫn append suffix.
+- Target suffix đã có thì idempotent, không append lần hai.

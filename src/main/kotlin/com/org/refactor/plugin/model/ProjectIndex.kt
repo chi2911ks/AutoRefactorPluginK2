@@ -8,6 +8,7 @@ data class ProjectIndex(
     val manifestFiles: List<SourceFile>,
     val navigationGraphs: List<SourceFile>,
     val gradleModules: List<String>,
+    val androidResourceFiles: List<AndroidResourceFile> = emptyList(),
 )
 
 data class ModuleInfo(

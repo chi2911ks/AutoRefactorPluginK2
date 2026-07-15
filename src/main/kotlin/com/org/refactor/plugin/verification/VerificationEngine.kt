@@ -10,13 +10,19 @@ import com.intellij.psi.PsiErrorElement
 import com.intellij.psi.PsiImportList
 import com.intellij.psi.PsiManager
 import com.intellij.psi.PsiPolyVariantReference
+import com.intellij.psi.search.FilenameIndex
+import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.PsiTreeUtil
 import com.org.refactor.plugin.model.RefactorPlan
+import com.org.refactor.plugin.executor.ResourceTextUpdater
+import com.org.refactor.plugin.model.AndroidResourceType
+import com.org.refactor.plugin.model.ResourceRename
 
 data class VerificationResult(
     val passed: Boolean, val psiErrors: List<String>,
     val duplicateSymbols: List<String>, val brokenImports: List<String>,
     val checksRun: Int, val checksPassed: Int,
+    val staleResourceReferences: List<String> = emptyList(),
 )
 
 class VerificationEngine(private val project: Project) {
@@ -32,10 +38,15 @@ class VerificationEngine(private val project: Project) {
         val classCounts = mutableMapOf<String, MutableList<String>>()
         val newClassNames = plan.componentRenames.map { it.newName }.toSet()
         val renameMap = plan.fileRenames.associate { it.oldPath to it.newPath }
+        val resourcePaths = plan.resourceRenames.filter { it.checked }
+            .flatMap { rename -> rename.variants.map { it.newPath } }
+        val stringPaths = plan.stringResourceRenames.filter { it.checked }
+            .flatMap { rename -> rename.variants.map { it.sourceFile } }
         val affectedPaths = (
             plan.componentRenames.map { it.sourceFile } +
                 plan.symbolRenames.map { it.sourceFile } +
-                plan.shuffleFilePaths
+                plan.typeAliasRenames.map { it.sourceFile } +
+                plan.shuffleFilePaths + resourcePaths + stringPaths
             )
             .map { renameMap[it] ?: it }
             .distinct()
@@ -73,7 +84,10 @@ class VerificationEngine(private val project: Project) {
             if (files.size > 1) duplicates.add("Dup '$name': ${files.joinToString()}")
         }
 
-        val results = listOf(psiErrors.isEmpty(), duplicates.isEmpty(), badImports.isEmpty())
+        val staleResources = findStaleResourceReferences(plan)
+        val results = listOf(
+            psiErrors.isEmpty(), duplicates.isEmpty(), badImports.isEmpty(), staleResources.isEmpty(),
+        )
         return VerificationResult(
             passed = results.all { it },
             psiErrors = psiErrors,
@@ -81,7 +95,53 @@ class VerificationEngine(private val project: Project) {
             brokenImports = badImports,
             checksRun = results.size,
             checksPassed = results.count { it },
+            staleResourceReferences = staleResources,
         )
+    }
+
+    private fun findStaleResourceReferences(plan: RefactorPlan): List<String> {
+        val renames = plan.resourceRenames.filter { it.checked } +
+            plan.stringResourceRenames.filter { it.checked }.map { rename ->
+                ResourceRename(
+                    type = rename.type,
+                    moduleName = rename.moduleName,
+                    oldName = rename.oldName,
+                    newName = rename.newName,
+                    variants = emptyList(),
+                )
+            }
+        if (renames.isEmpty()) return emptyList()
+        val oldValueNames = plan.stringResourceRenames.filter { it.checked }
+            .map { it.type.name.lowercase() to it.oldName }
+        val selectedStringFiles = plan.stringResourceRenames.filter { it.checked }
+            .flatMap { rename -> rename.variants.map { it.sourceFile.replace('\\', '/') } }
+            .toSet()
+        val scope = GlobalSearchScope.projectScope(project)
+        val stale = mutableListOf<String>()
+        for (extension in listOf("kt", "java", "xml")) {
+            for (file in FilenameIndex.getAllFilesByExt(project, extension, scope)) {
+                val path = file.path.replace('\\', '/').lowercase()
+                if ("/build/" in path || "/generated/" in path) continue
+                val text = try {
+                    String(file.contentsToByteArray())
+                } catch (_: Exception) {
+                    continue
+                }
+                if (ResourceTextUpdater.containsOldReference(text, extension, renames)) {
+                    stale.add("${file.path}: stale Android resource or View Binding reference")
+                }
+                if (extension == "xml" && file.path.replace('\\', '/') in selectedStringFiles &&
+                    oldValueNames.any { (tagName, oldName) ->
+                        Regex(
+                            "<$tagName\\b[^>]*\\bname\\s*=\\s*[\"']${Regex.escape(oldName)}[\"']",
+                        ).containsMatchIn(text)
+                    }
+                ) {
+                    stale.add("${file.path}: stale value resource declaration")
+                }
+            }
+        }
+        return stale.distinct()
     }
 
     private fun line(element: PsiElement): Int {

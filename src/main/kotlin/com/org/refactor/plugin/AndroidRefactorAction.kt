@@ -91,6 +91,10 @@ class AndroidRefactorAction : AnAction() {
                             appendLine()
                             appendLine("Classes renamed: ${result.classesRenamed}")
                             appendLine("Symbols renamed: ${result.symbolsRenamed}")
+                            appendLine("Typealiases renamed: ${result.typeAliasesRenamed}")
+                            appendLine("String resources renamed: ${result.stringsRenamed}")
+                            appendLine("Drawables renamed: ${result.drawablesRenamed}")
+                            appendLine("Layouts renamed: ${result.layoutsRenamed}")
                             appendLine("References updated: ${result.referencesUpdated}")
                             shuffleResult?.let {
                                 appendLine("Files shuffled: ${it.filesChanged}/${it.filesScanned}")
