@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.org.refactor.plugin.k2"
-version = "1.0.0-SNAPSHOT"
+version = "1.0.1-SNAPSHOT"
 
 repositories {
     mavenCentral()

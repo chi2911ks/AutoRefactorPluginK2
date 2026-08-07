@@ -72,6 +72,17 @@ class ReportGenerator {
             }
             appendLine()
 
+            appendLine("## Values XML Selection")
+            appendLine()
+            for (group in plan.valueXmlFileGroups) {
+                val status = if (group.checked) "selected" else "excluded"
+                appendLine(
+                    "- `${group.fileName}` (${group.moduleName}, $status, " +
+                        "${group.variants.size} variant(s))",
+                )
+            }
+            appendLine()
+
             appendLine("## Value Resources")
             appendLine()
             for (rename in plan.stringResourceRenames) {

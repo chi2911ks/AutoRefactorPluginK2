@@ -8,8 +8,26 @@ import com.intellij.psi.xml.XmlFile
 import com.org.refactor.plugin.model.ProjectIndex
 import com.org.refactor.plugin.model.AndroidResourceType
 import com.org.refactor.plugin.model.StringResourceInfo
+import com.org.refactor.plugin.model.ValueXmlFileInfo
 
 class StringResourceDiscoverer(private val project: Project) {
+    fun discoverFiles(index: ProjectIndex): List<ValueXmlFileInfo> =
+        ReadAction.compute<List<ValueXmlFileInfo>, RuntimeException> {
+            index.allXmlFiles.mapNotNull { source ->
+                val normalized = source.absolutePath.replace('\\', '/')
+                val match = VALUES_DIRECTORY.find(normalized) ?: return@mapNotNull null
+                val virtualFile = LocalFileSystem.getInstance().findFileByPath(source.absolutePath)
+                    ?: return@mapNotNull null
+                ValueXmlFileInfo(
+                    moduleName = source.moduleName,
+                    fileName = match.groupValues[2],
+                    sourceFile = source.absolutePath,
+                    valuesDirectory = match.groupValues[1],
+                    isWritable = virtualFile.isWritable,
+                )
+            }.distinctBy { it.sourceFile }
+        }
+
     fun discover(index: ProjectIndex): List<StringResourceInfo> =
         ReadAction.compute<List<StringResourceInfo>, RuntimeException> {
             index.allXmlFiles.flatMap { source ->
@@ -47,7 +65,10 @@ class StringResourceDiscoverer(private val project: Project) {
     }
 
     private companion object {
-        val VALUES_DIRECTORY = Regex("/res/(values(?:-[^/]+)?)/[^/]+\\.xml$", RegexOption.IGNORE_CASE)
+        val VALUES_DIRECTORY = Regex(
+            "/res/(values(?:-[^/]+)?)/([^/]+\\.xml)$",
+            RegexOption.IGNORE_CASE,
+        )
         val RESOURCE_NAME = Regex("[a-z][a-z0-9_]*")
         val STYLE_NAME = Regex("[A-Za-z][A-Za-z0-9_.]*")
     }

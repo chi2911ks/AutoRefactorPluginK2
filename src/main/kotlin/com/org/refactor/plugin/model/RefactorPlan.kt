@@ -6,6 +6,7 @@ data class RefactorPlan(
     val symbolRenames: List<SymbolRename>,
     val typeAliasRenames: List<TypeAliasRename> = emptyList(),
     val stringResourceRenames: List<StringResourceRename> = emptyList(),
+    val valueXmlFileGroups: List<ValueXmlFileGroup> = emptyList(),
     val resourceRenames: List<ResourceRename> = emptyList(),
     val fileRenames: List<FileRename>,
     val shuffleFilePaths: List<String>,
@@ -38,6 +39,8 @@ data class StringResourceRename(
     val checked: Boolean = false,
     val selectable: Boolean = true,
     val skipReason: String? = null,
+    val blockedByValueFileSelection: Boolean = false,
+    val checkedBeforeValueFileExclusion: Boolean? = null,
 )
 
 data class StringResourceVariant(

@@ -143,6 +143,8 @@ Nếu key đích tồn tại trong bất kỳ `values*` variant nào của cùng
 
 Áp dụng cùng preview và tính nguyên tử cho `<color>` và `<style>`, với option riêng mặc định bật. Style giữ nguyên casing và phân cấp dấu chấm, ví dụ `AppTheme.AdAttribution` -> `inv125_AppTheme.AdAttribution`; cập nhật cả `R.color`, `@color`, `R.style`, `@style` và style parent references.
 
+Nhóm mọi `res/values*/*.xml` theo logical module và filename qua tất cả qualifier thành checkbox riêng, mặc định tích chọn. Vẫn hiển thị file không chứa tag được hỗ trợ. Nếu bỏ tích một nhóm file, khóa và bỏ qua toàn bộ logical `<string>`, `<color>`, hoặc `<style>` xuất hiện trong bất kỳ variant nào của nhóm đó.
+
 ### Tests cần bổ sung
 
 - Prefix cũ ở đầu, giữa, cuối, xuất hiện nhiều lần và khác hoa/thường.

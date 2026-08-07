@@ -20,6 +20,7 @@ Classes and typealiases are enabled by default. Functions, variables, and shuffl
 - Update contextual Kotlin, Java, and XML references such as `R.layout.*`, `R.drawable.*`, `@layout/*`, and `@drawable/*`.
 - Update View Binding type imports and usages after layout renames without editing generated files.
 - Rename `<string>`, `<color>`, and `<style>` declarations across every `values*` variant.
+- Select logical `res/values*/*.xml` file groups before refactoring. Files with the same name across qualifiers such as `values`, `values-night`, and `values-v31` share one checkbox.
 - Update `R.string`, `R.color`, `R.style`, XML resource references, and explicit style parents. Android framework parents such as `android:Theme.Light` remain unchanged.
 - Skip a complete logical resource when any variant collides, is missing, or is read-only.
 
@@ -40,7 +41,7 @@ Resource suffixes are normalized to lowercase. Style casing and dot-separated hi
 
 The module picker supports one or more modules and groups IntelliJ source sets such as `app.main` under the logical `app` module. **All modules** is equivalent to selecting every logical module.
 
-The preview displays planned class, symbol, typealias, file-resource, and value-resource renames. Uncheck individual value resources to exclude them. Collision and read-only rows are disabled and reported before execution.
+The preview displays planned class, symbol, typealias, file-resource, values-XML, and value-resource renames. Values XML groups and individual value resources are checked by default. Excluding one file group atomically excludes every logical key appearing in any of its qualifier variants. Collision and read-only rows are disabled and reported before execution.
 
 ## Requirements
 

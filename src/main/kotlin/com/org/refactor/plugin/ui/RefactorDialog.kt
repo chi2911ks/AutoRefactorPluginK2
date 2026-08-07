@@ -24,7 +24,10 @@ import com.org.refactor.plugin.model.SymbolInfo
 import com.org.refactor.plugin.model.TypeAliasInfo
 import com.org.refactor.plugin.model.StringResourceInfo
 import com.org.refactor.plugin.model.StringResourceRename
+import com.org.refactor.plugin.model.ValueXmlFileGroup
+import com.org.refactor.plugin.model.ValueXmlFileInfo
 import com.org.refactor.plugin.plan.RefactorPlanGenerator
+import com.org.refactor.plugin.plan.ValueXmlSelection
 import com.org.refactor.plugin.psi.UniversalSymbolCollector
 import com.org.refactor.plugin.references.DependencyGraph
 import com.org.refactor.plugin.scanner.ProjectScanner
@@ -57,6 +60,7 @@ class RefactorDialog(private val project: Project) : DialogWrapper(project) {
     private var symbols: List<SymbolInfo> = emptyList()
     private var typeAliases: List<TypeAliasInfo> = emptyList()
     private var stringResources: List<StringResourceInfo> = emptyList()
+    private var valueXmlFiles: List<ValueXmlFileInfo> = emptyList()
 
     var refactorPlan: RefactorPlan? = null
         private set
@@ -285,18 +289,55 @@ class RefactorDialog(private val project: Project) : DialogWrapper(project) {
             tabs.addTab("Resources (0)", JLabel("No drawable or layout rename selected or required"))
         }
 
+        var valueResourceModel: StringResourceTableModel? = null
+        var valuesTabIndex = -1
+        val valueFiles = plan.valueXmlFileGroups
+        if (valueFiles.isNotEmpty()) {
+            val fileTabIndex = tabs.tabCount
+            val model = ValueXmlFileTableModel(valueFiles) { updatedGroups ->
+                refactorPlan?.let { current ->
+                    val updatedPlan = ValueXmlSelection.apply(current, updatedGroups)
+                    refactorPlan = updatedPlan
+                    tabs.setTitleAt(
+                        fileTabIndex,
+                        "Values XML (${updatedGroups.count { it.checked }}/${updatedGroups.size})",
+                    )
+                    valueResourceModel?.replaceRows(updatedPlan.stringResourceRenames)
+                    if (valuesTabIndex >= 0) {
+                        tabs.setTitleAt(
+                            valuesTabIndex,
+                            "Values (${updatedPlan.stringResourceRenames.count { it.checked }}/" +
+                                "${updatedPlan.stringResourceRenames.size})",
+                        )
+                    }
+                }
+            }
+            tabs.addTab(
+                "Values XML (${valueFiles.count { it.checked }}/${valueFiles.size})",
+                JBScrollPane(JTable(model).apply {
+                    rowHeight = 24
+                    fillsViewportHeight = true
+                    autoResizeMode = JTable.AUTO_RESIZE_LAST_COLUMN
+                    setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
+                }),
+            )
+        } else {
+            tabs.addTab("Values XML (0)", JLabel("No res/values* XML file available"))
+        }
+
         val strings = plan.stringResourceRenames
         if (strings.isNotEmpty()) {
-            val tabIndex = tabs.tabCount
+            valuesTabIndex = tabs.tabCount
             val model = StringResourceTableModel(strings) { updated ->
                 refactorPlan?.let { current ->
                     refactorPlan = current.copy(stringResourceRenames = updated)
                     tabs.setTitleAt(
-                        tabIndex,
+                        valuesTabIndex,
                         "Values (${updated.count { it.checked }}/${updated.size})",
                     )
                 }
             }
+            valueResourceModel = model
             tabs.addTab(
                 "Values (${strings.count { it.checked }}/${strings.size})",
                 JBScrollPane(JTable(model).apply {
@@ -392,6 +433,11 @@ class RefactorDialog(private val project: Project) : DialogWrapper(project) {
                     } else {
                         emptyList()
                     }
+                    valueXmlFiles = if (options.refactorStrings || options.refactorColors || options.refactorStyles) {
+                        StringResourceDiscoverer(project).discoverFiles(index)
+                    } else {
+                        emptyList()
+                    }
 
                     indicator.text = "Generating plan..."
                     refactorPlan = RefactorPlanGenerator(options).generate(
@@ -401,6 +447,7 @@ class RefactorDialog(private val project: Project) : DialogWrapper(project) {
                         index.androidResourceFiles,
                         typeAliases,
                         stringResources,
+                        valueXmlFiles,
                     )
 
                     // Preview deliberately avoids project-wide ReferencesSearch. Usage discovery
@@ -550,6 +597,47 @@ private class StringResourceTableModel(
             4 -> ModuleSelection.shortDisplayName(rename.moduleName)
             5 -> rename.variants.size.toString()
             6 -> rename.skipReason ?: if (rename.checked) "Selected" else "Not selected"
+            else -> ""
+        }
+    }
+
+    override fun setValueAt(value: Any?, rowIndex: Int, columnIndex: Int) {
+        if (!isCellEditable(rowIndex, columnIndex)) return
+        rows[rowIndex] = rows[rowIndex].copy(checked = value == true)
+        fireTableRowsUpdated(rowIndex, rowIndex)
+        onSelectionChanged(rows.toList())
+    }
+
+    fun replaceRows(updated: List<StringResourceRename>) {
+        rows.clear()
+        rows.addAll(updated)
+        fireTableDataChanged()
+    }
+}
+
+private class ValueXmlFileTableModel(
+    groups: List<ValueXmlFileGroup>,
+    private val onSelectionChanged: (List<ValueXmlFileGroup>) -> Unit,
+) : AbstractTableModel() {
+    private val rows = groups.toMutableList()
+    private val columns = arrayOf("Selected", "File", "Module", "Variants", "Status")
+
+    override fun getRowCount(): Int = rows.size
+    override fun getColumnCount(): Int = columns.size
+    override fun getColumnName(column: Int): String = columns[column]
+    override fun getColumnClass(columnIndex: Int): Class<*> =
+        if (columnIndex == 0) java.lang.Boolean::class.java else String::class.java
+
+    override fun isCellEditable(rowIndex: Int, columnIndex: Int): Boolean = columnIndex == 0
+
+    override fun getValueAt(rowIndex: Int, columnIndex: Int): Any {
+        val group = rows[rowIndex]
+        return when (columnIndex) {
+            0 -> group.checked
+            1 -> group.fileName
+            2 -> ModuleSelection.shortDisplayName(group.moduleName)
+            3 -> group.variants.size.toString()
+            4 -> if (group.variants.any { !it.isWritable }) "Contains read-only variant" else "Ready"
             else -> ""
         }
     }

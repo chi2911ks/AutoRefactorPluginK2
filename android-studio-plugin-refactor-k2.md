@@ -2,7 +2,7 @@
 
 > **Status:** Implemented & building (2026-07-02)
 > **Build:** `cd D:\VuaCode\AutoRefactor\AutoRefactorPluginK2 && ./gradlew --no-daemon buildPlugin` → BUILD SUCCESSFUL
-> **Artifact:** `build/distributions/AutoRefactorPluginK2-1.0.0-SNAPSHOT.zip` (~1.75MB)
+> **Artifact:** `build/distributions/AutoRefactorPluginK2-1.0.1-SNAPSHOT.zip`
 > **Base:** copy của `AutoRefactorPlugin`, chuyển từ reflection sang **Kotlin K2 Analysis API** trực tiếp.
 
 Đây là biến thể K2 của [android-studio-plugin-refactor](android-studio-plugin-refactor.md). Tài liệu này ghi lại **mọi thay đổi so với bản gốc** trong session 2026-07-02.

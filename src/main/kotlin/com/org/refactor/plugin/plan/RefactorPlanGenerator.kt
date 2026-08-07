@@ -18,6 +18,9 @@ import com.org.refactor.plugin.model.TypeAliasRename
 import com.org.refactor.plugin.model.StringResourceInfo
 import com.org.refactor.plugin.model.StringResourceRename
 import com.org.refactor.plugin.model.StringResourceVariant
+import com.org.refactor.plugin.model.ValueXmlFileGroup
+import com.org.refactor.plugin.model.ValueXmlFileInfo
+import com.org.refactor.plugin.model.ValueXmlFileVariant
 import java.io.File
 
 class RefactorPlanGenerator(private val options: RefactorOptions) {
@@ -29,6 +32,7 @@ class RefactorPlanGenerator(private val options: RefactorOptions) {
         resources: List<AndroidResourceFile> = emptyList(),
         typeAliases: List<TypeAliasInfo> = emptyList(),
         strings: List<StringResourceInfo> = emptyList(),
+        valueXmlFiles: List<ValueXmlFileInfo> = emptyList(),
     ): RefactorPlan {
         val componentRenames = if (options.refactorClasses) {
             components.mapNotNull(::classRename)
@@ -89,6 +93,7 @@ class RefactorPlanGenerator(private val options: RefactorOptions) {
             symbolRenames = symbolRenames,
             typeAliasRenames = typeAliasRenames,
             stringResourceRenames = stringResourceRenames,
+            valueXmlFileGroups = buildValueXmlFileGroups(valueXmlFiles),
             resourceRenames = resourceRenames,
             fileRenames = fileRenames,
             shuffleFilePaths = shuffleFilePaths,
@@ -98,6 +103,25 @@ class RefactorPlanGenerator(private val options: RefactorOptions) {
             totalTypeAliases = typeAliasRenames.size,
         )
     }
+
+    private fun buildValueXmlFileGroups(files: List<ValueXmlFileInfo>): List<ValueXmlFileGroup> =
+        files.groupBy { file ->
+            ValueXmlFileKey(ModuleSelection.logicalName(file.moduleName), file.fileName.lowercase())
+        }.map { (key, variants) ->
+            ValueXmlFileGroup(
+                moduleName = key.moduleName,
+                fileName = variants.first().fileName,
+                variants = variants.map { variant ->
+                    ValueXmlFileVariant(
+                        sourceFile = variant.sourceFile,
+                        valuesDirectory = variant.valuesDirectory,
+                        isWritable = variant.isWritable,
+                    )
+                }.distinctBy { it.sourceFile }
+                    .sortedWith(compareBy({ it.valuesDirectory }, { it.sourceFile })),
+                checked = true,
+            )
+        }.sortedWith(compareBy({ it.moduleName }, { it.fileName.lowercase() }))
 
     private fun buildStringResourceRenames(strings: List<StringResourceInfo>): List<StringResourceRename> {
         if (!options.refactorStrings && !options.refactorColors && !options.refactorStyles) return emptyList()
@@ -290,6 +314,11 @@ class RefactorPlanGenerator(private val options: RefactorOptions) {
         val moduleName: String,
         val type: AndroidResourceType,
         val name: String,
+    )
+
+    private data class ValueXmlFileKey(
+        val moduleName: String,
+        val fileName: String,
     )
 
     internal fun transformName(oldName: String): String {
