@@ -26,7 +26,7 @@ Classes, type aliases, drawables, layouts, strings, colors, and styles are selec
 - Kotlin plugin with K2 support
 - A Kotlin/Android project
 
-The plugin supports IntelliJ Platform builds `251` through `261.*`.
+The plugin supports IntelliJ Platform builds `251` through `262.*`.
 
 ### Install from a GitHub release
 
@@ -110,7 +110,7 @@ Mặc định plugin chọn class, typealias, drawable, layout, string, color v�
 - Kotlin plugin hỗ trợ K2
 - Dự án Kotlin/Android
 
-Plugin hỗ trợ IntelliJ Platform build từ `251` đến `261.*`.
+Plugin hỗ trợ IntelliJ Platform build từ `251` đến `262.*`.
 
 ### Cài đặt từ GitHub Release
 

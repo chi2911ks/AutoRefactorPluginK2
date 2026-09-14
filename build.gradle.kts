@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.org.refactor.plugin.k2"
-version = "1.0.1-SNAPSHOT"
+version = "1.0.2-SNAPSHOT"
 
 repositories {
     mavenCentral()
@@ -31,7 +31,7 @@ intellijPlatform {
     pluginConfiguration {
         ideaVersion {
             sinceBuild = "251"
-            untilBuild = "261.*"
+            untilBuild = "262.*"
         }
     }
 }
