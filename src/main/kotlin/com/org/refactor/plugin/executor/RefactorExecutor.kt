@@ -5,17 +5,13 @@ import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
-import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.psi.*
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.search.searches.OverridingMethodsSearch
 import com.intellij.psi.search.FilenameIndex
 import com.intellij.psi.util.PsiTreeUtil
-import com.intellij.refactoring.rename.RenameProcessor
-import com.intellij.refactoring.rename.naming.AutomaticRenamer
 import com.intellij.usageView.UsageInfo
 import com.org.refactor.plugin.model.*
 import com.org.refactor.plugin.psi.K2Analysis
@@ -41,7 +37,7 @@ class RefactorExecutor(private val project: Project) {
     )
     private data class ClassTarget(
         val rename: ComponentRename,
-        val pointer: SmartPsiElementPointer<KtClassOrObject>?,
+        val pointer: SmartPsiElementPointer<PsiNamedElement>?,
     )
     private data class TypeAliasTarget(
         val rename: TypeAliasRename,
@@ -55,6 +51,7 @@ class RefactorExecutor(private val project: Project) {
         val typeAliasesRenamed: Int = 0,
         val stringsRenamed: Int = 0,
         val errors: List<String>, val warnings: List<String>, val durationMs: Long,
+        val classRenameBatches: Int = 0,
     )
 
     fun execute(plan: RefactorPlan): ExecutionResult {
@@ -81,6 +78,7 @@ class RefactorExecutor(private val project: Project) {
         var typeAliasesRenamed = 0
         var stringsRenamed = 0
         var referencesUpdated = 0; var drawablesRenamed = 0; var layoutsRenamed = 0
+        var classRenameBatches = 0
         val symbolLog = mutableListOf<String>()   // per-symbol diagnostic trace
 
         val unchecked = plan.componentRenames.filter { it.checked }
@@ -115,43 +113,51 @@ class RefactorExecutor(private val project: Project) {
                 symbolLog.add("FAIL ${symbol.oldName}->${symbol.newName}: ${e.message}")
             }
         }
-        for (target in classTargets.sortedByDescending { it.rename.fqn.count { char -> char == '.' } }) {
-            val rename = target.rename
+
+        // Rename class files before the batch PSI operation. Multi-element IntelliJ rename can
+        // automatically rename only the first related file, leaving later old-path handles stale.
+        for (r in plan.fileRenames) {
             try {
+                if (renameFile(r)) filesRenamed++
+            } catch (_: Exception) {}
+        }
+
+        val classRequests = classTargets
+            .sortedByDescending { it.rename.fqn.count { char -> char == '.' } }
+            .mapNotNull { target ->
+                val rename = target.rename
                 val declaration = target.pointer?.element
-                    ?: throw IllegalStateException("Declaration not found: ${rename.fqn}")
-                renameClass(declaration, rename.newName)
-                classesRenamed++
-            } catch (e: Exception) {
-                errors.add("${rename.oldName}: ${e.message}")
+                if (declaration == null) {
+                    errors.add("${rename.oldName}: Declaration not found: ${rename.fqn}")
+                    null
+                } else {
+                    ClassRenameBatch.Request(declaration, rename.newName)
+                }
+            }
+        if (classRequests.isNotEmpty()) {
+            val batchResult = ClassRenameBatch(project).execute(classRequests)
+            if (batchResult.success) {
+                classesRenamed += batchResult.renamed
+                classRenameBatches++
+            } else {
+                errors.addAll(batchResult.errors.map { "Class batch: $it" })
             }
         }
 
         // ═══ Post: XML + ProGuard + Files ═══
         val classMap = unchecked.associate { it.oldName to it.newName }
         if (classMap.isNotEmpty()) {
-            for (ext in listOf("xml", "pro")) {
-                for (vf in FilenameIndex.getAllFilesByExt(project, ext, GlobalSearchScope.projectScope(project))) {
-                    applyToDoc(vf) { replaceClassNames(it, classMap) }
+            val scope = GlobalSearchScope.projectScope(project)
+            val classReferenceFiles = buildSet {
+                addAll(FilenameIndex.getAllFilesByExt(project, "xml", scope))
+                addAll(FilenameIndex.getAllFilesByExt(project, "pro", scope))
+                for (name in PROGUARD_FILE_NAMES) {
+                    addAll(FilenameIndex.getVirtualFilesByName(project, name, scope))
                 }
             }
-            project.baseDir?.let { baseDir ->
-                VfsUtilCore.visitChildrenRecursively(baseDir, object : com.intellij.openapi.vfs.VirtualFileVisitor<Void>() {
-                    override fun visitFile(f: VirtualFile): Boolean {
-                        if (!f.isDirectory && f.name in setOf("proguard-rules.pro", "proguard-rules.txt", "proguard.cfg")) {
-                            applyToDoc(f) { replaceClassNames(it, classMap) }
-                        }
-                        return true
-                    }
-                })
+            for (vf in classReferenceFiles) {
+                applyToDoc(vf) { ClassReferenceRewriter.rewrite(it, classMap) }
             }
-        }
-
-        for (r in plan.fileRenames) {
-            try {
-                val vf = LocalFileSystem.getInstance().findFileByPath(r.oldPath) ?: continue
-                if (vf.parent?.findChild(r.newFileName) == null) { vf.rename(this, r.newFileName); filesRenamed++ }
-            } catch (_: Exception) {}
         }
 
         // Resource text changes can shift arbitrary Kotlin offsets, so apply them only after all
@@ -166,8 +172,6 @@ class RefactorExecutor(private val project: Project) {
         stringsRenamed = stringResult.stringsRenamed
         referencesUpdated += stringResult.referencesUpdated
         warnings.addAll(stringResult.warnings)
-        VirtualFileManager.getInstance().syncRefresh()
-
         // Diagnostic trace — one line per symbol (renamed / skipped-with-reason / failed).
         try {
             project.basePath?.let { base ->
@@ -183,18 +187,27 @@ class RefactorExecutor(private val project: Project) {
             typeAliasesRenamed = typeAliasesRenamed,
             stringsRenamed = stringsRenamed,
             durationMs = System.currentTimeMillis() - startTime,
+            classRenameBatches = classRenameBatches,
         )
     }
 
     private fun createClassTargets(renames: List<ComponentRename>): List<ClassTarget> =
         ReadAction.compute<List<ClassTarget>, RuntimeException> {
             val pointerManager = SmartPointerManager.getInstance(project)
-            renames.map { rename ->
-                val virtualFile = LocalFileSystem.getInstance().findFileByPath(rename.sourceFile)
-                val file = virtualFile?.let { PsiManager.getInstance(project).findFile(it) as? KtFile }
-                val declaration = file?.collectDescendantsOfType<KtClassOrObject>()?.firstOrNull {
-                    it.textRange.startOffset == rename.declarationOffset && it.name == rename.oldName
+            val declarationsByFile = renames.map { it.sourceFile }.distinct().associateWith { path ->
+                val virtualFile = LocalFileSystem.getInstance().findFileByPath(path)
+                val file = virtualFile?.let { PsiManager.getInstance(project).findFile(it) }
+                when (file) {
+                    is KtFile -> file.collectDescendantsOfType<KtClassOrObject>()
+                    is PsiJavaFile -> file.classes.filter { it.containingClass == null }
+                    else -> emptyList()
                 }
+            }
+            renames.map { rename ->
+                val declaration = declarationsByFile[rename.sourceFile]
+                    .orEmpty()
+                    .filterIsInstance<PsiNamedElement>()
+                    .firstOrNull { hasDeclaration(rename.declarationOffset, rename.oldName, it) }
                 ClassTarget(rename, declaration?.let { pointerManager.createSmartPsiElementPointer(it) })
             }
         }
@@ -203,7 +216,7 @@ class RefactorExecutor(private val project: Project) {
         ReadAction.compute<List<SymbolTarget>, RuntimeException> {
             val pointerManager = SmartPointerManager.getInstance(project)
             renames.map { rename ->
-                val declaration = findKotlinDeclaration(rename)
+                val declaration = findDeclaration(rename)
                 SymbolTarget(
                     rename,
                     declaration?.let { pointerManager.createSmartPsiElementPointer(it) },
@@ -227,61 +240,63 @@ class RefactorExecutor(private val project: Project) {
             }
         }
 
-    private fun findKotlinDeclaration(rename: SymbolRename): PsiNamedElement? {
+    private fun findDeclaration(rename: SymbolRename): PsiNamedElement? {
         val virtualFile = LocalFileSystem.getInstance().findFileByPath(rename.sourceFile) ?: return null
-        val file = PsiManager.getInstance(project).findFile(virtualFile) as? KtFile ?: return null
-        return file.collectDescendantsOfType<KtNamedDeclaration>().firstOrNull { declaration ->
-            if (declaration.textRange.startOffset != rename.declarationOffset || declaration.name != rename.oldName) {
-                return@firstOrNull false
+        return when (val file = PsiManager.getInstance(project).findFile(virtualFile)) {
+            is KtFile -> file.collectDescendantsOfType<KtNamedDeclaration>().firstOrNull { declaration ->
+                if (!hasDeclaration(rename.declarationOffset, rename.oldName, declaration)) {
+                    return@firstOrNull false
+                }
+                when (rename.kind) {
+                    SymbolKind.FUNCTION -> declaration is KtNamedFunction
+                    SymbolKind.PROPERTY, SymbolKind.FIELD ->
+                        declaration is KtProperty || declaration is KtParameter && declaration.hasValOrVar()
+                    else -> false
+                }
             }
-            when (rename.kind) {
-                SymbolKind.FUNCTION -> declaration is KtNamedFunction
-                SymbolKind.PROPERTY, SymbolKind.FIELD ->
-                    declaration is KtProperty || declaration is KtParameter && declaration.hasValOrVar()
-                else -> false
-            }
+            is PsiJavaFile -> findJavaDeclaration(file, rename)
+            else -> null
         }
     }
 
-    private fun renameClass(declaration: KtClassOrObject, newName: String) {
-        runImmediateRename(declaration, newName, acceptRelatedRenames = true)
+    private fun findJavaDeclaration(file: PsiJavaFile, rename: SymbolRename): PsiNamedElement? {
+        val classes = file.classes.asSequence()
+            .filter { it.qualifiedName == rename.ownerScope }
+            .ifEmpty { file.classes.asSequence() }
+        return when (rename.kind) {
+            SymbolKind.FUNCTION -> classes
+                .flatMap { it.methods.asSequence() }
+                .firstOrNull { method ->
+                    !method.isConstructor && hasDeclaration(rename.declarationOffset, rename.oldName, method)
+                }
+            SymbolKind.PROPERTY, SymbolKind.FIELD -> classes
+                .flatMap { it.fields.asSequence() }
+                .firstOrNull { field -> hasDeclaration(rename.declarationOffset, rename.oldName, field) }
+            else -> null
+        }
+    }
+
+    private fun hasDeclaration(offset: Int, name: String, element: PsiNamedElement): Boolean {
+        if (element.name != name) return false
+        val identifierOffset = (element as? PsiNameIdentifierOwner)?.nameIdentifier?.textRange?.startOffset
+        return offset == element.textRange.startOffset || offset == identifierOffset
     }
 
     private fun renameTypeAlias(declaration: KtTypeAlias, newName: String) {
-        runImmediateRename(declaration, newName, acceptRelatedRenames = false)
+        runImmediateRename(declaration, newName)
     }
 
     private fun runImmediateRename(
         declaration: PsiElement,
         newName: String,
-        acceptRelatedRenames: Boolean,
     ) {
         val action = {
-            ImmediateRenameProcessor(project, declaration, newName, acceptRelatedRenames).run()
+            val processor = AutoAcceptRenameProcessor(project, declaration, newName)
+            processor.respectAllAutomaticRenames(listOf(declaration))
+            processor.run()
         }
         val application = ApplicationManager.getApplication()
         if (application.isDispatchThread) action() else application.invokeAndWait(action)
-    }
-
-    /** Kotlin's rename processor force-enables preview when it also renames the source file. */
-    private class ImmediateRenameProcessor(
-        project: Project,
-        declaration: PsiElement,
-        newName: String,
-        private val acceptRelatedRenames: Boolean,
-    ) : RenameProcessor(project, declaration, newName, false, false) {
-        override fun isPreviewUsages(usages: Array<UsageInfo>): Boolean = false
-
-        /** Accept every related rename suggested by IntelliJ without showing its selection dialog. */
-        override fun showAutomaticRenamingDialog(renamer: AutomaticRenamer): Boolean {
-            if (!acceptRelatedRenames) return false
-            for (element in renamer.elements) {
-                renamer.getNewName(element)?.let { suggestedName ->
-                    renamer.setRename(element, suggestedName)
-                }
-            }
-            return true
-        }
     }
 
     // ─────── Universal symbol rename: ReferencesSearch + OverridingMethodsSearch ───────
@@ -509,12 +524,6 @@ class RefactorExecutor(private val project: Project) {
         }
     }
 
-    private fun replaceClassNames(t: String, map: Map<String, String>): String {
-        var x = t
-        for ((o, n) in map) { x = x.replace("android:name=\"$o\"", "android:name=\"$n\"") }
-        return x
-    }
-
     private fun applyToDoc(vf: VirtualFile, transform: (String) -> String): Int {
         val pf = PsiManager.getInstance(project).findFile(vf) ?: return 0
         val dm = PsiDocumentManager.getInstance(project)
@@ -523,5 +532,26 @@ class RefactorExecutor(private val project: Project) {
         if (nu == doc.text) return 0
         WriteCommandAction.runWriteCommandAction(project) { doc.setText(nu); dm.commitDocument(doc) }
         return 1
+    }
+
+    private fun renameFile(rename: FileRename): Boolean {
+        val vf = LocalFileSystem.getInstance().findFileByPath(rename.oldPath) ?: return false
+        if (vf.parent?.findChild(rename.newFileName) != null) return false
+        var renamed = false
+        WriteCommandAction.runWriteCommandAction(project) {
+            if (vf.isValid && vf.parent?.findChild(rename.newFileName) == null) {
+                vf.rename(this, rename.newFileName)
+                renamed = true
+            }
+        }
+        return renamed
+    }
+
+    private companion object {
+        val PROGUARD_FILE_NAMES = setOf(
+            "proguard-rules.pro",
+            "proguard-rules.txt",
+            "proguard.cfg",
+        )
     }
 }

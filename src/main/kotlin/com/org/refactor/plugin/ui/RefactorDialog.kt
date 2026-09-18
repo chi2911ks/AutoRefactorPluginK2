@@ -404,7 +404,7 @@ class RefactorDialog(private val project: Project) : DialogWrapper(project) {
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Scanning Project...", false) {
             override fun run(indicator: ProgressIndicator) {
                 try {
-                    indicator.text = "Scanning Kotlin sources..."
+                    indicator.text = "Scanning Kotlin and Java sources..."
                     val scanner = ProjectScanner(project)
                     val index = scanner.scan(options.selectedModuleNames)
                     scanDebug = scanner.debug
@@ -418,7 +418,11 @@ class RefactorDialog(private val project: Project) : DialogWrapper(project) {
                     }
 
                     indicator.text = "Collecting functions and variables..."
-                    symbols = UniversalSymbolCollector(project).collectAll(index, options)
+                    symbols = if (options.hasSymbolOperation) {
+                        UniversalSymbolCollector(project).collectAll(index, options)
+                    } else {
+                        emptyList()
+                    }
 
                     indicator.text = "Collecting typealiases..."
                     typeAliases = if (options.refactorTypeAliases) {
@@ -482,7 +486,7 @@ class RefactorDialog(private val project: Project) : DialogWrapper(project) {
                             ?.joinToString(", ")
                             ?: "All"
                         append(" | Modules: $modules")
-                        append(" | Kotlin files: ${scanDebug?.kotlinCount ?: 0}")
+                        append(" | Kotlin/Java files: ${scanDebug?.kotlinCount ?: 0}/${scanDebug?.javaCount ?: 0}")
                         append(" | Shuffle files: ${plan.shuffleFilePaths.size} | Conflicts: $conflicts")
                     }
                 } else {

@@ -27,7 +27,7 @@ class AndroidRefactorAction : AnAction() {
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(
             project,
-            "Applying Kotlin Refactor...",
+            "Applying Kotlin/Java Refactor...",
             false,
         ) {
             private var execution: RefactorExecutor.ExecutionResult? = null

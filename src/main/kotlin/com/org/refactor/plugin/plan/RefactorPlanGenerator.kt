@@ -76,7 +76,9 @@ class RefactorPlanGenerator(private val options: RefactorOptions) {
             )
         }.distinctBy { it.oldPath }
 
+        // DeclarationShuffler operates on Kotlin PSI; Java refactor targets must not enter it.
         val renameTargetFiles = (componentRenames.map { it.sourceFile } + symbolRenames.map { it.sourceFile })
+            .filter { File(it).extension.equals("kt", ignoreCase = true) }
             .distinct()
         val resourceRenames = buildResourceRenames(resources)
         val typeAliasRenames = buildTypeAliasRenames(typeAliases)

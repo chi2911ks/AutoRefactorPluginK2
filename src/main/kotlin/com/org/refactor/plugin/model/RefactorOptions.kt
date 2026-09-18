@@ -25,6 +25,9 @@ data class RefactorOptions(
     val hasShuffleOperation: Boolean
         get() = shuffleFunctions || shuffleVariables
 
+    val hasSymbolOperation: Boolean
+        get() = refactorFunctions || refactorVariables
+
     val hasAnyOperation: Boolean
         get() = hasRefactorOperation || hasShuffleOperation
 }

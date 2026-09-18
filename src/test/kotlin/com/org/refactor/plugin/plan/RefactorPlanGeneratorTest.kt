@@ -26,6 +26,23 @@ class RefactorPlanGeneratorTest {
     }
 
     @Test
+    fun `class-only options do not require symbol collection`() {
+        val classOnly = RefactorOptions(
+            suffixToAdd = "Ref",
+            refactorTypeAliases = false,
+            refactorStrings = false,
+            refactorColors = false,
+            refactorStyles = false,
+            refactorDrawables = false,
+            refactorLayouts = false,
+        )
+
+        assertFalse(classOnly.hasSymbolOperation)
+        assertTrue(classOnly.copy(refactorFunctions = true).hasSymbolOperation)
+        assertTrue(classOnly.copy(refactorVariables = true).hasSymbolOperation)
+    }
+
+    @Test
     fun `removes old suffix before adding shared suffix`() {
         val generator = RefactorPlanGenerator(
             RefactorOptions(suffixToAdd = "Inv125", suffixToRemove = "Inv124"),
@@ -115,5 +132,39 @@ class RefactorPlanGeneratorTest {
         )
 
         assertEquals(listOf("A.kt", "B.kt"), plan.shuffleFilePaths)
+    }
+
+    @Test
+    fun `shuffle targets remain Kotlin-only when Java refactors are selected`() {
+        val options = RefactorOptions(
+            suffixToAdd = "Ref",
+            refactorClasses = false,
+            refactorFunctions = true,
+            refactorTypeAliases = false,
+            refactorStrings = false,
+            refactorColors = false,
+            refactorStyles = false,
+            refactorDrawables = false,
+            refactorLayouts = false,
+            shuffleFunctions = true,
+        )
+        val javaSymbol = SymbolInfo(
+            name = "loadData",
+            fqn = "Feature.java@10:loadData",
+            kind = SymbolKind.FUNCTION,
+            psiElementClass = "PsiMethod",
+            sourceFile = "Feature.java",
+            lineNumber = 1,
+            declarationOffset = 10,
+            parentClassFqn = "sample.Feature",
+        )
+
+        val plan = RefactorPlanGenerator(options).generate(
+            emptyList(),
+            listOf(javaSymbol),
+            listOf("Other.kt"),
+        )
+
+        assertTrue(plan.shuffleFilePaths.isEmpty())
     }
 }

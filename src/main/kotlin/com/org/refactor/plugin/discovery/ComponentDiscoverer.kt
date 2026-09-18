@@ -3,6 +3,9 @@ package com.org.refactor.plugin.discovery
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiJavaFile
+import com.intellij.psi.PsiModifier
 import com.intellij.psi.PsiManager
 import com.org.refactor.plugin.model.ComponentInfo
 import com.org.refactor.plugin.model.ComponentType
@@ -15,12 +18,13 @@ import org.jetbrains.kotlin.psi.KtFile
 import org.jetbrains.kotlin.psi.KtObjectDeclaration
 import org.jetbrains.kotlin.psi.psiUtil.collectDescendantsOfType
 
-/** Discovers named Kotlin class-like declarations in writable project sources. */
+/** Discovers named Kotlin and Java class-like declarations in writable project sources. */
 class ComponentDiscoverer(private val project: Project) {
 
     fun discover(index: ProjectIndex): List<ComponentInfo> =
         ReadAction.compute<List<ComponentInfo>, RuntimeException> {
-            index.allKotlinFiles.flatMap(::discoverFile)
+            (index.allKotlinFiles.flatMap(::discoverFile) + index.allJavaFiles.flatMap(::discoverJavaFile))
+                .distinctBy { it.fqn }
         }
 
     private fun discoverFile(sourceFile: SourceFile): List<ComponentInfo> {
@@ -41,6 +45,21 @@ class ComponentDiscoverer(private val project: Project) {
                     (it.isObjectLiteral() || it.isCompanion() && it.nameIdentifier == null)
             }
             .mapNotNull { declaration -> declaration.toComponentInfo(sourceFile, ktFile) }
+            .toList()
+    }
+
+    private fun discoverJavaFile(sourceFile: SourceFile): List<ComponentInfo> {
+        if (isGenerated(sourceFile.absolutePath)) return emptyList()
+        val virtualFile = LocalFileSystem.getInstance().findFileByPath(sourceFile.absolutePath)
+            ?: return emptyList()
+        if (!virtualFile.isWritable) return emptyList()
+        val javaFile = PsiManager.getInstance(project).findFile(virtualFile) as? PsiJavaFile
+            ?: return emptyList()
+
+        return javaFile.classes
+            .asSequence()
+            .filter { it.containingClass == null }
+            .mapNotNull { it.toComponentInfo(sourceFile, javaFile) }
             .distinctBy { it.fqn }
             .toList()
     }
@@ -67,6 +86,27 @@ class ComponentDiscoverer(private val project: Project) {
             declarationOffset = textRange.startOffset,
             isTopLevel = parent is KtFile,
             isAbstract = this is KtClass && (isInterface() || hasModifier(org.jetbrains.kotlin.lexer.KtTokens.ABSTRACT_KEYWORD)),
+        )
+    }
+
+    private fun PsiClass.toComponentInfo(sourceFile: SourceFile, file: PsiJavaFile): ComponentInfo? {
+        val name = name ?: return null
+        val qualifiedName = qualifiedName ?: return null
+        val type = when {
+            isAnnotationType -> ComponentType.ANNOTATION
+            isEnum -> ComponentType.ENUM
+            isInterface -> ComponentType.INTERFACE
+            else -> ComponentType.CLASS
+        }
+        return ComponentInfo(
+            file = sourceFile,
+            className = name,
+            fqn = qualifiedName,
+            packageName = file.packageName,
+            componentType = type,
+            declarationOffset = nameIdentifier?.textRange?.startOffset ?: textRange.startOffset,
+            isTopLevel = containingClass == null,
+            isAbstract = isInterface || hasModifierProperty(PsiModifier.ABSTRACT),
         )
     }
 

@@ -1,6 +1,6 @@
-# Kotlin Auto Refactor (K2)
+# Kotlin/Java Auto Refactor (K2)
 
-Kotlin Auto Refactor is an IntelliJ IDEA and Android Studio plugin that safely renames Kotlin declarations and Android resources across a project. It scans the project first, shows the planned changes and conflicts, and then applies the selected refactors using Kotlin PSI and the K2 Analysis API.
+Kotlin/Java Auto Refactor is an IntelliJ IDEA and Android Studio plugin that safely renames Kotlin and Java declarations and Android resources across a project. It scans the project first, shows the planned changes and conflicts, and then applies the selected refactors using IntelliJ PSI and the K2 Analysis API.
 
 > [Tiếng Việt](#tiếng-việt)
 
@@ -9,6 +9,7 @@ Kotlin Auto Refactor is an IntelliJ IDEA and Android Studio plugin that safely r
 ### Features
 
 - Rename top-level Kotlin classes, interfaces, objects, enum classes, annotations, and type aliases.
+- Rename top-level Java classes. Java methods and fields are optional; constructors, parameters, nested declarations, enum constants, callbacks, and SDK/library overrides are skipped.
 - Optionally rename functions and variables. Parameters, nested declarations, and enum entries are never targets.
 - Skip generated or read-only declarations, SDK/library overrides, and unsafe accessor collisions.
 - Rename `drawable*` and `layout*` resources together with qualifier variants such as `layout-land` and `drawable-night`.
@@ -24,7 +25,7 @@ Classes, type aliases, drawables, layouts, strings, colors, and styles are selec
 
 - IntelliJ IDEA 2025.1+ or a compatible Android Studio version
 - Kotlin plugin with K2 support
-- A Kotlin/Android project
+- A Kotlin, Java, or Android project
 
 The plugin supports IntelliJ Platform builds `251` through `262.*`.
 
@@ -40,9 +41,9 @@ If the IDE reports that the plugin is incompatible, check the IDE build under **
 
 ### Usage
 
-1. Open a Kotlin or Android project and wait for indexing to finish.
+1. Open a Kotlin, Java, or Android project and wait for indexing to finish.
 2. Commit or back up your current changes before running a project-wide refactor.
-3. Select **Tools > Kotlin Project Refactor (K2)**.
+3. Select **Tools > Kotlin/Java Project Refactor (K2)**.
 4. Select **All modules** or the modules you want to process.
 5. Enter the suffix to add and, optionally, the text to remove.
 6. Select the refactor operations. Functions, variables, and declaration shuffling must be enabled explicitly.

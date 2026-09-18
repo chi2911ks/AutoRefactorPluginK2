@@ -3,6 +3,11 @@ package com.org.refactor.plugin.conflict
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiField
+import com.intellij.psi.PsiJavaFile
+import com.intellij.psi.PsiMethod
+import com.intellij.psi.PsiNameIdentifierOwner
 import com.intellij.psi.PsiManager
 import com.org.refactor.plugin.model.*
 import com.org.refactor.plugin.references.DependencyGraph
@@ -127,6 +132,18 @@ class ConflictDetector(private val project: Project) {
             if (collision) addExistingTargetConflict(rename.oldName, rename.newName, rename.sourceFile, conflicts)
         }
 
+        for (rename in plan.componentRenames) {
+            if (kotlinFile(rename.sourceFile) != null) continue
+            val file = javaFile(rename.sourceFile) ?: continue
+            val source = file.classes.firstOrNull {
+                it.matchesDeclaration(rename.declarationOffset, rename.oldName)
+            } ?: continue
+            val collision = file.classes.any { candidate ->
+                candidate !== source && candidate.name == rename.newName
+            }
+            if (collision) addExistingTargetConflict(rename.oldName, rename.newName, rename.sourceFile, conflicts)
+        }
+
         for (rename in plan.symbolRenames) {
             val file = kotlinFile(rename.sourceFile) ?: continue
             val source = file.collectDescendantsOfType<KtNamedDeclaration>().firstOrNull {
@@ -142,11 +159,52 @@ class ConflictDetector(private val project: Project) {
             }
             if (collision) addExistingTargetConflict(rename.oldName, rename.newName, rename.sourceFile, conflicts)
         }
+
+        for (rename in plan.symbolRenames) {
+            if (kotlinFile(rename.sourceFile) != null) continue
+            val file = javaFile(rename.sourceFile) ?: continue
+            val classes = file.classes
+                .filter { it.qualifiedName == rename.ownerScope }
+                .ifEmpty { file.classes.toList() }
+            val source = classes.asSequence()
+                .flatMap { javaMembers(it, rename).asSequence() }
+                .firstOrNull { member -> member.matchesDeclaration(rename.declarationOffset, rename.oldName) }
+                ?: continue
+            val collision = when (source) {
+                is PsiMethod -> source.containingClass?.methods.orEmpty().any { candidate ->
+                    candidate !== source && candidate.name == rename.newName &&
+                        candidate.parameterList.parametersCount == source.parameterList.parametersCount
+                }
+                is PsiField -> source.containingClass?.fields.orEmpty().any { candidate ->
+                    candidate !== source && candidate.name == rename.newName
+                }
+                else -> false
+            }
+            if (collision) addExistingTargetConflict(rename.oldName, rename.newName, rename.sourceFile, conflicts)
+        }
     }
 
     private fun kotlinFile(path: String): KtFile? {
         val virtualFile = LocalFileSystem.getInstance().findFileByPath(path) ?: return null
         return PsiManager.getInstance(project).findFile(virtualFile) as? KtFile
+    }
+
+    private fun javaFile(path: String): PsiJavaFile? {
+        val virtualFile = LocalFileSystem.getInstance().findFileByPath(path) ?: return null
+        return PsiManager.getInstance(project).findFile(virtualFile) as? PsiJavaFile
+    }
+
+    private fun javaMembers(javaClass: PsiClass, rename: SymbolRename): List<PsiNameIdentifierOwner> =
+        when (rename.kind) {
+            SymbolKind.FUNCTION -> javaClass.methods.toList()
+            SymbolKind.FIELD, SymbolKind.PROPERTY -> javaClass.fields.toList()
+            else -> emptyList()
+        }
+
+    private fun PsiNameIdentifierOwner.matchesDeclaration(offset: Int, name: String): Boolean {
+        if (this.name != name) return false
+        val identifierOffset = nameIdentifier?.textRange?.startOffset
+        return offset == textRange.startOffset || offset == identifierOffset
     }
 
     private fun addExistingTargetConflict(
