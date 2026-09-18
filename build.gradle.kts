@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "com.org.refactor.plugin.k2"
-version = "1.0.2-SNAPSHOT"
+version = "1.0.9-SNAPSHOT"
 
 repositories {
     mavenCentral()

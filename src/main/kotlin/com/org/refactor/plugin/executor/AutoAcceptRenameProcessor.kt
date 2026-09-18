@@ -20,8 +20,15 @@ internal class AutoAcceptRenameProcessor(
         AutomaticRenamePolicy.acceptAll(renamer)
 
     /** Matches RenameRefactoring.respectAllAutomaticRenames without using its default processor. */
-    fun respectAllAutomaticRenames(elements: Collection<PsiElement>) {
+    fun respectAllAutomaticRenames(
+        elements: Collection<PsiElement>,
+        includeTestRenames: Boolean = false,
+    ) {
         for (factory in AutomaticRenamerFactory.EP_NAME.extensionList) {
+            // Test factories parse test frameworks and may traverse unitTest/androidTest PSI for
+            // every production class. Tests are not rename targets in this plugin; ordinary test
+            // usages are still updated by RenameProcessor's reference search.
+            if (!includeTestRenames && factory.javaClass.simpleName.contains("TestRenamer")) continue
             if (factory.optionName != null && elements.any(factory::isApplicable)) {
                 addRenamerFactory(factory)
             }

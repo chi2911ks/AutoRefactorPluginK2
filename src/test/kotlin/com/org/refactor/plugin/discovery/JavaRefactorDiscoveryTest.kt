@@ -404,6 +404,30 @@ class JavaRefactorDiscoveryTest : BasePlatformTestCase() {
         )
     }
 
+    @Test
+    fun `rewrites fully qualified and relative Android Java class names`() {
+        val rewritten = ClassReferenceRewriter.rewrite(
+            """
+                <activity android:name="sample.JavaFeature" />
+                <service android:name=".JavaScreen" />
+                <item name="sample.JavaFeature" />
+            """.trimIndent(),
+            mapOf(
+                "sample.JavaFeature" to "sample.JavaFeatureRef",
+                "JavaScreen" to "JavaScreenRef",
+            ),
+        )
+
+        assertEquals(
+            """
+                <activity android:name="sample.JavaFeatureRef" />
+                <service android:name=".JavaScreenRef" />
+                <item name="sample.JavaFeature" />
+            """.trimIndent(),
+            rewritten,
+        )
+    }
+
     private fun javaClass(source: SourceFile): com.intellij.psi.PsiNamedElement =
         ReadAction.compute<com.intellij.psi.PsiNamedElement, RuntimeException> {
             val virtualFile = LocalFileSystem.getInstance().findFileByPath(source.absolutePath)

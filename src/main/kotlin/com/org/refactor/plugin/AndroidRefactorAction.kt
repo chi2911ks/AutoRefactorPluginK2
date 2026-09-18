@@ -5,6 +5,8 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
+import com.intellij.openapi.project.DumbService
+import com.intellij.openapi.project.IndexNotReadyException
 import com.intellij.openapi.ui.Messages
 import com.org.refactor.plugin.executor.RefactorExecutor
 import com.org.refactor.plugin.report.ReportGenerator
@@ -57,7 +59,7 @@ class AndroidRefactorAction : AnAction() {
                     }
 
                     indicator.text = "Verifying affected files..."
-                    verification = VerificationEngine(project).verify(plan)
+                    verification = verifyWhenSmart(project, plan, indicator)
 
                     indicator.text = "Writing report..."
                     val baseDir = project.basePath ?: System.getProperty("user.home")
@@ -120,5 +122,31 @@ class AndroidRefactorAction : AnAction() {
                 }
             }
         })
+    }
+
+    private fun verifyWhenSmart(
+        project: com.intellij.openapi.project.Project,
+        plan: com.org.refactor.plugin.model.RefactorPlan,
+        indicator: ProgressIndicator,
+    ): VerificationResult {
+        var attempt = 0
+        while (true) {
+            DumbService.getInstance(project).waitForSmartMode()
+            try {
+                return VerificationEngine(project).verify(plan)
+            } catch (error: Throwable) {
+                var cause: Throwable? = error
+                var indexNotReady = false
+                while (cause != null) {
+                    if (cause is IndexNotReadyException) {
+                        indexNotReady = true
+                        break
+                    }
+                    cause = cause.cause
+                }
+                if (!indexNotReady || attempt++ >= 3) throw error
+                indicator.text2 = "Indexes changed; retrying verification (${attempt}/3)"
+            }
+        }
     }
 }

@@ -8,8 +8,13 @@ internal object ClassReferenceRewriter {
     fun rewrite(text: String, classMap: Map<String, String>): String {
         if (classMap.isEmpty()) return text
         return androidNameAttribute.replace(text) { match ->
-            val replacement = classMap[match.groupValues[3]] ?: return@replace match.value
-            "${match.groupValues[1]}${match.groupValues[2]}$replacement${match.groupValues[2]}"
+            val original = match.groupValues[3]
+            val replacement = classMap[original]
+                ?: original.removePrefix(".").let { classMap[it] }
+                ?: return@replace match.value
+            val qualified = original.startsWith(".") && !replacement.startsWith(".")
+            val rendered = if (qualified) ".${replacement}" else replacement
+            "${match.groupValues[1]}${match.groupValues[2]}$rendered${match.groupValues[2]}"
         }
     }
 }

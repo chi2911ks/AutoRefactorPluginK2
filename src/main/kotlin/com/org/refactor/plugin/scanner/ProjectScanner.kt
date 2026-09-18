@@ -155,6 +155,10 @@ class ProjectScanner(private val project: Project) {
                     return walkedDirs.add(file.path)
                 }
                 val name = file.name
+                // Test declarations are not refactor targets. Usage updates still run later
+                // through IntelliJ's reference resolver, so a test that actually references a
+                // renamed production class is updated while unrelated tests are never scanned.
+                if (isTestSourcePath(file.path)) return true
                 val ext = file.extension?.lowercase() ?: return true
                 val moduleName = fileIndex.getModuleForFile(file)?.name ?: "unknown"
                 AndroidResourceParser.parse(file.path, moduleName)?.let(resourceFiles::add)
@@ -214,6 +218,7 @@ class ProjectScanner(private val project: Project) {
                 } else {
                     val ext = child.extension.lowercase()
                     val absPath = child.absolutePath.replace('\\', '/')
+                    if (isTestSourcePath(absPath)) continue
                     val sf = SourceFile(
                         virtualFilePath = absPath, absolutePath = absPath,
                         moduleName = "unknown", fileType = FileType.OTHER
@@ -260,9 +265,19 @@ class ProjectScanner(private val project: Project) {
         return androidModules
     }
 
-    private companion object {
+    companion object {
         val SKIPPED_DIRECTORIES = setOf(
             "build", ".gradle", ".git", ".idea", "node_modules", "__pycache__",
         )
+
+        internal fun isTestSourcePath(path: String): Boolean {
+            val normalized = path.replace('\\', '/')
+            val sourcePath = normalized.substringAfter("/src/", missingDelimiterValue = "")
+            if (sourcePath.isEmpty()) return false
+            val sourceSet = sourcePath.substringBefore('/')
+            // Covers test, unitTest, androidTest, testFixtures and variant source sets such as
+            // debugUnitTest without excluding production sets like main/debug/release.
+            return sourceSet.contains("test", ignoreCase = true)
+        }
     }
 }

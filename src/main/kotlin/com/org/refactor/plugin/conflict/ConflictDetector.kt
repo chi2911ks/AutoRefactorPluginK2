@@ -122,9 +122,26 @@ class ConflictDetector(private val project: Project) {
         plan: RefactorPlan,
         conflicts: MutableList<RefactorConflict>,
     ) {
+        // A large project can contain many declarations in the same source file. Resolve and
+        // parse each PSI file once; the previous per-rename lookup turned a 1,500-class plan into
+        // thousands of repeated tree walks while the preview dialog was waiting on the EDT.
+        val kotlinFiles = mutableMapOf<String, KtFile?>()
+        val javaFiles = mutableMapOf<String, PsiJavaFile?>()
+        fun cachedKotlin(path: String): KtFile? = kotlinFiles.getOrPut(path) { kotlinFile(path) }
+        fun cachedJava(path: String): PsiJavaFile? = javaFiles.getOrPut(path) { javaFile(path) }
+        val kotlinDeclarations = mutableMapOf<String, List<KtClassOrObject>>()
+        val javaTopLevelClasses = mutableMapOf<String, List<PsiClass>>()
+        fun kotlinDeclarations(path: String): List<KtClassOrObject> =
+            kotlinDeclarations.getOrPut(path) {
+                cachedKotlin(path)?.collectDescendantsOfType<KtClassOrObject>().orEmpty()
+            }
+        fun javaTopLevelClasses(path: String): List<PsiClass> =
+            javaTopLevelClasses.getOrPut(path) {
+                cachedJava(path)?.classes?.filter { it.containingClass == null }.orEmpty()
+            }
+
         for (rename in plan.componentRenames) {
-            val file = kotlinFile(rename.sourceFile) ?: continue
-            val source = file.collectDescendantsOfType<KtClassOrObject>().firstOrNull {
+            val source = kotlinDeclarations(rename.sourceFile).firstOrNull {
                 it.textRange.startOffset == rename.declarationOffset && it.name == rename.oldName
             } ?: continue
             val collision = source.parent.children.filterIsInstance<KtClassOrObject>()
@@ -133,20 +150,20 @@ class ConflictDetector(private val project: Project) {
         }
 
         for (rename in plan.componentRenames) {
-            if (kotlinFile(rename.sourceFile) != null) continue
-            val file = javaFile(rename.sourceFile) ?: continue
-            val source = file.classes.firstOrNull {
+            if (cachedKotlin(rename.sourceFile) != null) continue
+            val classes = javaTopLevelClasses(rename.sourceFile)
+            val source = classes.firstOrNull {
                 it.matchesDeclaration(rename.declarationOffset, rename.oldName)
             } ?: continue
-            val collision = file.classes.any { candidate ->
+            val collision = classes.any { candidate ->
                 candidate !== source && candidate.name == rename.newName
             }
             if (collision) addExistingTargetConflict(rename.oldName, rename.newName, rename.sourceFile, conflicts)
         }
 
         for (rename in plan.symbolRenames) {
-            val file = kotlinFile(rename.sourceFile) ?: continue
-            val source = file.collectDescendantsOfType<KtNamedDeclaration>().firstOrNull {
+            val source = cachedKotlin(rename.sourceFile)
+                ?.collectDescendantsOfType<KtNamedDeclaration>()?.firstOrNull {
                 it.textRange.startOffset == rename.declarationOffset && it.name == rename.oldName
             } ?: continue
             val collision = source.parent.children.filterIsInstance<KtNamedDeclaration>().any { candidate ->
@@ -161,11 +178,10 @@ class ConflictDetector(private val project: Project) {
         }
 
         for (rename in plan.symbolRenames) {
-            if (kotlinFile(rename.sourceFile) != null) continue
-            val file = javaFile(rename.sourceFile) ?: continue
-            val classes = file.classes
+            if (cachedKotlin(rename.sourceFile) != null) continue
+            val classes = javaTopLevelClasses(rename.sourceFile)
                 .filter { it.qualifiedName == rename.ownerScope }
-                .ifEmpty { file.classes.toList() }
+                .ifEmpty { javaTopLevelClasses(rename.sourceFile) }
             val source = classes.asSequence()
                 .flatMap { javaMembers(it, rename).asSequence() }
                 .firstOrNull { member -> member.matchesDeclaration(rename.declarationOffset, rename.oldName) }

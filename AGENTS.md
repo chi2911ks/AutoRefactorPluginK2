@@ -35,11 +35,17 @@ Resource replacements must be contextual (`R.layout`, `R.drawable`, `@layout`, `
 
 ## Class Refactor Performance Safeguards
 
-Class-only refactors skip function/variable symbol collection. Resolve class declarations once per source file, then submit selected Kotlin/Java class renames through one IntelliJ multi-element rename transaction. Rename planned class files in write-command context before the PSI batch so later smart pointers do not retain stale paths.
+Class-only refactors skip function/variable symbol collection. Resolve class declarations once per source file, then submit selected Kotlin/Java class renames through bounded IntelliJ multi-element rename transactions. Keep smart-pointer preparation scoped to the current batch; do not retain pointers/usages for the entire all-module plan. Use a conservative batch size (currently 20) and allow progress events between batches.
+
+Class declarations must be renamed before their source files. Rename planned class files only after every selected class declaration resolves and the class batch completes successfully. If any declaration cannot be resolved, or the number of successful class renames is lower than the planned count, skip all class-file renames to prevent files with renamed names and stale Java/Kotlin declarations.
+
+Wait for Smart Mode before index-dependent reads and retry when `IndexNotReadyException` occurs between the wait and the read/rename operation. Apply this to class batches, class-reference indexing, and post-refactor verification. Do not surface an avoidable Dumb Mode race as a fatal refactor dialog.
 
 Build one class-name map and enumerate XML and known ProGuard candidates through indexes once. XML class references are rewritten contextually through mapped `android:name` attributes; unrelated attributes, comments, and arbitrary text are not changed by this optimization.
 
 Keep regression coverage for Java/Kotlin batch renames, usage updates, file renames, class-only scan skipping, and contextual XML rewriting.
+
+Large all-module refactors must be treated as memory-sensitive: avoid retaining PSI, usage, or undo state for completed batches, and test first with one module. A build failure caused by Windows paging-file exhaustion is an environment limitation, not a code verification result.
 
 ## Testing Guidelines
 

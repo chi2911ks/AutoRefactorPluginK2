@@ -3,6 +3,9 @@ package com.org.refactor.plugin.executor
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.project.DumbService
+import com.intellij.openapi.project.IndexNotReadyException
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
@@ -54,23 +57,13 @@ class RefactorExecutor(private val project: Project) {
         val classRenameBatches: Int = 0,
     )
 
-    fun execute(plan: RefactorPlan): ExecutionResult {
-        val application = ApplicationManager.getApplication()
-        if (application.isDispatchThread) return executeOnEdt(plan)
-
-        var result: ExecutionResult? = null
-        application.invokeAndWait {
-            result = executeOnEdt(plan)
-        }
-        return requireNotNull(result)
-    }
+    fun execute(plan: RefactorPlan): ExecutionResult = executePlan(plan)
 
     /**
-     * PSI rename processors and document mutations require IntelliJ's EDT write-intent context.
-     * The action may call this executor from a background progress task, so all model access in
-     * the mutation phase is marshalled to EDT as one operation.
+     * Orchestrates from the background progress task. Individual PSI mutations are marshalled to
+     * EDT separately, allowing repaint/progress events to run between bounded rename batches.
      */
-    private fun executeOnEdt(plan: RefactorPlan): ExecutionResult {
+    private fun executePlan(plan: RefactorPlan): ExecutionResult {
         val startTime = System.currentTimeMillis()
         val errors = mutableListOf<String>()
         val warnings = mutableListOf<String>()
@@ -95,7 +88,9 @@ class RefactorExecutor(private val project: Project) {
         for (target in typeAliasTargets) {
             val rename = target.rename
             try {
-                val declaration = target.pointer?.element
+                val declaration = ReadAction.compute<KtTypeAlias?, RuntimeException> {
+                    target.pointer?.element
+                }
                     ?: throw IllegalStateException("Typealias declaration not found: ${rename.fqn}")
                 renameTypeAlias(declaration, rename.newName)
                 typeAliasesRenamed++
@@ -106,7 +101,9 @@ class RefactorExecutor(private val project: Project) {
         for (target in symbolTargets) {
             val symbol = target.rename
             try {
-                val ok = renameSymbol(symbol, target.pointer?.element, symbolLog, overrideIndex)
+                val ok = runOnEdt {
+                    renameSymbol(symbol, target.pointer?.element, symbolLog, overrideIndex)
+                }
                 if (ok) symbolsRenamed++
             } catch (e: Exception) {
                 errors.add("${symbol.oldName}: ${e.message}")
@@ -114,61 +111,76 @@ class RefactorExecutor(private val project: Project) {
             }
         }
 
-        // Rename class files before the batch PSI operation. Multi-element IntelliJ rename can
-        // automatically rename only the first related file, leaving later old-path handles stale.
-        for (r in plan.fileRenames) {
-            try {
-                if (renameFile(r)) filesRenamed++
-            } catch (_: Exception) {}
-        }
-
-        val classRequests = classTargets
-            .sortedByDescending { it.rename.fqn.count { char -> char == '.' } }
-            .mapNotNull { target ->
-                val rename = target.rename
-                val declaration = target.pointer?.element
-                if (declaration == null) {
-                    errors.add("${rename.oldName}: Declaration not found: ${rename.fqn}")
-                    null
-                } else {
-                    ClassRenameBatch.Request(declaration, rename.newName)
+        var classPreparationFailed = false
+        val classRequests = ReadAction.compute<List<ClassRenameBatch.Request>, RuntimeException> {
+            classTargets
+                .sortedByDescending { it.rename.fqn.count { char -> char == '.' } }
+                .mapNotNull { target ->
+                    val rename = target.rename
+                    val declaration = target.pointer?.element
+                    if (declaration == null) {
+                        classPreparationFailed = true
+                        errors.add("${rename.oldName}: Declaration not found: ${rename.fqn}")
+                        null
+                    } else {
+                        ClassRenameBatch.Request(declaration, rename.newName)
+                    }
                 }
-            }
+        }
+        var classRenameSucceeded = !classPreparationFailed
         if (classRequests.isNotEmpty()) {
             val batchResult = ClassRenameBatch(project).execute(classRequests)
-            if (batchResult.success) {
-                classesRenamed += batchResult.renamed
-                classRenameBatches++
-            } else {
+            classesRenamed += batchResult.renamed
+            classRenameBatches += batchResult.batches
+            classRenameSucceeded = classRenameSucceeded &&
+                batchResult.success && batchResult.renamed == classRequests.size
+            if (!batchResult.success) {
                 errors.addAll(batchResult.errors.map { "Class batch: $it" })
             }
         }
 
+        // Rename files only after every class declaration in the plan has been updated. Renaming
+        // thousands of files first forces Android Studio to re-index while the declarations still
+        // have their old names and can leave the project in a file-renamed/class-old state if the
+        // following PSI batch runs out of memory or hits Dumb Mode.
+        if (classRenameSucceeded) {
+            filesRenamed += renameFiles(plan.fileRenames)
+        } else if (plan.fileRenames.isNotEmpty()) {
+            warnings.add("Class rename did not complete; class file renames were skipped")
+        }
+
         // ═══ Post: XML + ProGuard + Files ═══
-        val classMap = unchecked.associate { it.oldName to it.newName }
+        val classMap = buildClassReferenceMap(unchecked)
         if (classMap.isNotEmpty()) {
-            val scope = GlobalSearchScope.projectScope(project)
-            val classReferenceFiles = buildSet {
-                addAll(FilenameIndex.getAllFilesByExt(project, "xml", scope))
-                addAll(FilenameIndex.getAllFilesByExt(project, "pro", scope))
-                for (name in PROGUARD_FILE_NAMES) {
-                    addAll(FilenameIndex.getVirtualFilesByName(project, name, scope))
+            val classReferenceFiles = readWhenSmart {
+                val scope = GlobalSearchScope.projectScope(project)
+                buildSet {
+                    addAll(FilenameIndex.getAllFilesByExt(project, "xml", scope))
+                    addAll(FilenameIndex.getAllFilesByExt(project, "pro", scope))
+                    for (name in PROGUARD_FILE_NAMES) {
+                        addAll(FilenameIndex.getVirtualFilesByName(project, name, scope))
+                    }
                 }
             }
-            for (vf in classReferenceFiles) {
-                applyToDoc(vf) { ClassReferenceRewriter.rewrite(it, classMap) }
-            }
+            // Keep the indexed file set, but commit all XML/ProGuard edits as one write command.
+            // A command per file makes large all-module refactors spend most of their time in
+            // command/undo bookkeeping and repeatedly invalidates PSI on the EDT.
+            applyToDocs(classReferenceFiles) { ClassReferenceRewriter.rewrite(it, classMap) }
         }
 
         // Resource text changes can shift arbitrary Kotlin offsets, so apply them only after all
         // symbol/class pointer-based refactorings are complete.
-        val resourceResult = ResourceRefactorExecutor(project).execute(plan.resourceRenames)
+        val resourceResult = runOnEdt {
+            ResourceRefactorExecutor(project).execute(plan.resourceRenames)
+        }
         drawablesRenamed = resourceResult.drawablesRenamed
         layoutsRenamed = resourceResult.layoutsRenamed
         filesRenamed += resourceResult.filesRenamed
         referencesUpdated += resourceResult.referencesUpdated
         warnings.addAll(resourceResult.warnings)
-        val stringResult = StringResourceRefactorExecutor(project).execute(plan.stringResourceRenames)
+        val stringResult = runOnEdt {
+            StringResourceRefactorExecutor(project).execute(plan.stringResourceRenames)
+        }
         stringsRenamed = stringResult.stringsRenamed
         referencesUpdated += stringResult.referencesUpdated
         warnings.addAll(stringResult.warnings)
@@ -524,30 +536,104 @@ class RefactorExecutor(private val project: Project) {
         }
     }
 
-    private fun applyToDoc(vf: VirtualFile, transform: (String) -> String): Int {
-        val pf = PsiManager.getInstance(project).findFile(vf) ?: return 0
-        val dm = PsiDocumentManager.getInstance(project)
-        val doc = dm.getDocument(pf) ?: return 0
-        val nu = transform(doc.text)
-        if (nu == doc.text) return 0
-        WriteCommandAction.runWriteCommandAction(project) { doc.setText(nu); dm.commitDocument(doc) }
-        return 1
+    private fun applyToDocs(files: Set<VirtualFile>, transform: (String) -> String): Int = runOnEdt {
+        val documents = files.mapNotNull { vf ->
+            val psi = PsiManager.getInstance(project).findFile(vf) ?: return@mapNotNull null
+            val document = PsiDocumentManager.getInstance(project).getDocument(psi) ?: return@mapNotNull null
+            document to transform(document.text)
+        }.filter { (document, text) -> text != document.text }
+        if (documents.isEmpty()) return@runOnEdt 0
+
+        val documentManager = PsiDocumentManager.getInstance(project)
+        var changed = 0
+        WriteCommandAction.runWriteCommandAction(project, "Rewrite class references", null, {
+            for ((document, text) in documents) {
+                document.setText(text)
+                documentManager.commitDocument(document)
+                changed++
+            }
+        })
+        changed
     }
 
-    private fun renameFile(rename: FileRename): Boolean {
-        val vf = LocalFileSystem.getInstance().findFileByPath(rename.oldPath) ?: return false
-        if (vf.parent?.findChild(rename.newFileName) != null) return false
-        var renamed = false
-        WriteCommandAction.runWriteCommandAction(project) {
-            if (vf.isValid && vf.parent?.findChild(rename.newFileName) == null) {
-                vf.rename(this, rename.newFileName)
-                renamed = true
+    private fun buildClassReferenceMap(renames: List<ComponentRename>): Map<String, String> {
+        val result = mutableMapOf<String, String>()
+        val simpleNames = renames.groupBy { it.oldName }
+        for (rename in renames) {
+            // Fully-qualified Android component names are common in Java projects. Keep those
+            // mappings even when two modules contain the same simple class name.
+            result[rename.fqn] = rename.fqn.substringBeforeLast('.', "")
+                .let { packageName -> if (packageName.isEmpty()) rename.newName else "$packageName.${rename.newName}" }
+            if (simpleNames[rename.oldName].orEmpty().size == 1) {
+                result[rename.oldName] = rename.newName
             }
         }
-        return renamed
+        return result
+    }
+
+    private fun renameFiles(renames: List<FileRename>): Int {
+        if (renames.isEmpty()) return 0
+        val candidates = renames.mapNotNull { rename ->
+            val file = LocalFileSystem.getInstance().findFileByPath(rename.oldPath) ?: return@mapNotNull null
+            if (file.parent?.findChild(rename.newFileName) != null) return@mapNotNull null
+            file to rename.newFileName
+        }
+        if (candidates.isEmpty()) return 0
+
+        var totalRenamed = 0
+        val chunks = candidates.chunked(MAX_FILE_RENAMES_PER_COMMAND)
+        for ((index, chunk) in chunks.withIndex()) {
+            ProgressManager.getInstance().progressIndicator?.text2 =
+                "Renaming class files ${index + 1}/${chunks.size}"
+            totalRenamed += runOnEdt {
+                var renamed = 0
+                WriteCommandAction.runWriteCommandAction(project, "Rename class files", null, {
+                    for ((file, newFileName) in chunk) {
+                        if (file.isValid && file.parent?.findChild(newFileName) == null) {
+                            file.rename(this, newFileName)
+                            renamed++
+                        }
+                    }
+                })
+                renamed
+            }
+        }
+        return totalRenamed
+    }
+
+    private fun <T> runOnEdt(action: () -> T): T {
+        val application = ApplicationManager.getApplication()
+        if (application.isDispatchThread) return action()
+
+        var value: T? = null
+        var failure: Throwable? = null
+        application.invokeAndWait {
+            try {
+                value = action()
+            } catch (error: Throwable) {
+                failure = error
+            }
+        }
+        failure?.let { throw it }
+        @Suppress("UNCHECKED_CAST")
+        return value as T
+    }
+
+    private fun <T> readWhenSmart(action: () -> T): T {
+        var attempt = 0
+        while (true) {
+            DumbService.getInstance(project).waitForSmartMode()
+            try {
+                return ReadAction.compute<T, RuntimeException> { action() }
+            } catch (error: IndexNotReadyException) {
+                if (attempt++ >= MAX_INDEX_RETRIES) throw error
+            }
+        }
     }
 
     private companion object {
+        const val MAX_FILE_RENAMES_PER_COMMAND = 100
+        const val MAX_INDEX_RETRIES = 3
         val PROGUARD_FILE_NAMES = setOf(
             "proguard-rules.pro",
             "proguard-rules.txt",
