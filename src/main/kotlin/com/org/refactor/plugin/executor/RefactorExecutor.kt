@@ -129,7 +129,7 @@ class RefactorExecutor(private val project: Project) {
         }
         var classRenameSucceeded = !classPreparationFailed
         if (classRequests.isNotEmpty()) {
-            val batchResult = ClassRenameBatch(project).execute(classRequests)
+            val batchResult = ClassRenameBatch(project, plan.options.suffixToAdd).execute(classRequests)
             classesRenamed += batchResult.renamed
             classRenameBatches += batchResult.batches
             classRenameSucceeded = classRenameSucceeded &&
@@ -216,13 +216,41 @@ class RefactorExecutor(private val project: Project) {
                 }
             }
             renames.map { rename ->
-                val declaration = declarationsByFile[rename.sourceFile]
-                    .orEmpty()
-                    .filterIsInstance<PsiNamedElement>()
-                    .firstOrNull { hasDeclaration(rename.declarationOffset, rename.oldName, it) }
+                val declaration = findClassDeclaration(
+                    declarationsByFile[rename.sourceFile].orEmpty(),
+                    rename,
+                )
                 ClassTarget(rename, declaration?.let { pointerManager.createSmartPsiElementPointer(it) })
             }
         }
+
+    private fun findClassDeclaration(
+        declarations: List<PsiElement>,
+        rename: ComponentRename,
+    ): PsiNamedElement? {
+        val named = declarations.filterIsInstance<PsiNamedElement>()
+        // The offset is the fastest and safest match while the PSI is unchanged.
+        named.firstOrNull { hasDeclaration(rename.declarationOffset, rename.oldName, it) }
+            ?.let { return it }
+
+        // Imports, annotations, and preceding symbol edits can shift offsets before the class
+        // batch runs. Resolve by the declaration's real FQN instead of failing even though the
+        // class is still present in the expected source file. Include newName so a partially
+        // completed previous transaction is treated as already renamed by ClassRenameBatch.
+        return when {
+            declarations.firstOrNull() is KtClassOrObject ->
+                declarations.filterIsInstance<KtClassOrObject>().firstOrNull { declaration ->
+                    declaration.fqName?.asString() == rename.fqn &&
+                        declaration.name in setOf(rename.oldName, rename.newName)
+                }
+            declarations.firstOrNull() is PsiClass ->
+                declarations.filterIsInstance<PsiClass>().firstOrNull { declaration ->
+                    declaration.qualifiedName == rename.fqn &&
+                        declaration.name in setOf(rename.oldName, rename.newName)
+                }
+            else -> null
+        }
+    }
 
     private fun createSymbolTargets(renames: List<SymbolRename>): List<SymbolTarget> =
         ReadAction.compute<List<SymbolTarget>, RuntimeException> {
@@ -573,14 +601,31 @@ class RefactorExecutor(private val project: Project) {
 
     private fun renameFiles(renames: List<FileRename>): Int {
         if (renames.isEmpty()) return 0
+        var alreadyRenamed = 0
         val candidates = renames.mapNotNull { rename ->
-            val file = LocalFileSystem.getInstance().findFileByPath(rename.oldPath) ?: return@mapNotNull null
+            val file = LocalFileSystem.getInstance().findFileByPath(rename.oldPath)
+            if (file == null) {
+                // Kotlin/Java rename processors may automatically rename the containing file for
+                // some elements in a multi-element transaction. Count that completed result while
+                // leaving the remaining planned files to the explicit write command below.
+                if (LocalFileSystem.getInstance().findFileByPath(rename.newPath) != null) {
+                    alreadyRenamed++
+                }
+                return@mapNotNull null
+            }
+            // RenameProcessor may already have renamed the containing file. Never apply the
+            // planned rename again to the current file object; doing so is the path that can turn
+            // FooINV160 into FooINV160INV160 in a single refactor run.
+            if (file.name == rename.newFileName) {
+                alreadyRenamed++
+                return@mapNotNull null
+            }
             if (file.parent?.findChild(rename.newFileName) != null) return@mapNotNull null
             file to rename.newFileName
         }
-        if (candidates.isEmpty()) return 0
+        if (candidates.isEmpty()) return alreadyRenamed
 
-        var totalRenamed = 0
+        var totalRenamed = alreadyRenamed
         val chunks = candidates.chunked(MAX_FILE_RENAMES_PER_COMMAND)
         for ((index, chunk) in chunks.withIndex()) {
             ProgressManager.getInstance().progressIndicator?.text2 =

@@ -35,7 +35,14 @@ class RefactorPlanGenerator(private val options: RefactorOptions) {
         valueXmlFiles: List<ValueXmlFileInfo> = emptyList(),
     ): RefactorPlan {
         val componentRenames = if (options.refactorClasses) {
-            components.mapNotNull(::classRename)
+            // A source set can expose the same PSI declaration more than once when modules are
+            // grouped (for example app.main + app). Keep one request per declaration. Passing
+            // duplicates to RenameProcessor is unsafe: the first request changes the declaration
+            // and a later request can be applied to the already-renamed PSI element, producing a
+            // second suffix while the report still describes the original plan.
+            components
+                .mapNotNull(::classRename)
+                .distinctBy { Triple(it.sourceFile, it.declarationOffset, it.fqn) }
         } else {
             emptyList()
         }
@@ -60,14 +67,20 @@ class RefactorPlanGenerator(private val options: RefactorOptions) {
             )
         }
 
+        val topLevelComponentsByFile = components
+            .filter { it.isTopLevel }
+            .groupBy { it.file.absolutePath }
         val fileRenames = componentRenames.mapNotNull { rename ->
             val component = components.firstOrNull {
                 it.fqn == rename.fqn && it.declarationOffset == rename.declarationOffset
             } ?: return@mapNotNull null
             if (!component.isTopLevel) return@mapNotNull null
+            if (topLevelComponentsByFile[component.file.absolutePath].orEmpty().size != 1) {
+                return@mapNotNull null
+            }
             val source = File(component.file.absolutePath)
-            if (source.nameWithoutExtension != component.className) return@mapNotNull null
             val newFileName = "${rename.newName}.${source.extension}"
+            if (source.name == newFileName) return@mapNotNull null
             FileRename(
                 oldPath = component.file.absolutePath,
                 newPath = File(source.parentFile, newFileName).path.replace('\\', '/'),
@@ -326,8 +339,16 @@ class RefactorPlanGenerator(private val options: RefactorOptions) {
     internal fun transformName(oldName: String): String {
         val remove = options.suffixToRemove
         val add = options.suffixToAdd
-        val base = removeAllIgnoreCase(oldName, remove)
-        if (add.isEmpty() || base.endsWith(add, ignoreCase = true)) return base
+        var base = removeAllIgnoreCase(oldName, remove)
+        if (add.isEmpty()) return base
+
+        // Make reruns self-healing. A previous interrupted transaction may have produced
+        // FooINV160INV160 while the file/class plan still points at FooINV160. Treat repeated
+        // trailing suffixes as one logical suffix so the next run normalizes to FooINV160.
+        while (base.length > add.length * 2 && base.endsWith(add + add, ignoreCase = true)) {
+            base = base.dropLast(add.length)
+        }
+        if (base.endsWith(add, ignoreCase = true)) return base
         return base + add
     }
 

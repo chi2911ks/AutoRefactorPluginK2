@@ -120,6 +120,132 @@ class KotlinClassRefactorTest : BasePlatformTestCase() {
         )
     }
 
+    @Test
+    fun `renames every declaration across class shapes and batch boundary`() {
+        val declarations = listOf(
+            "FeatureViewModel" to "class FeatureViewModel",
+            "FeatureAdapter" to "class FeatureAdapter",
+            "FeatureMode" to "enum class FeatureMode { FIRST, SECOND }",
+            "FeatureState" to "sealed class FeatureState",
+            "UiState" to "sealed class UiState<out T>",
+        ) + (1..16).map { index -> "BatchType$index" to "class BatchType$index" }
+        val sources = declarations.map { (name, declaration) ->
+            addKotlinFile(
+                "sample/$name.kt",
+                """
+                    package sample
+
+                    $declaration
+                """.trimIndent(),
+            )
+        }
+        val components = ComponentDiscoverer(project).discover(indexFor(sources))
+        val options = RefactorOptions(
+            suffixToAdd = "Ref",
+            refactorTypeAliases = false,
+            refactorStrings = false,
+            refactorColors = false,
+            refactorStyles = false,
+            refactorDrawables = false,
+            refactorLayouts = false,
+        )
+        val plan = RefactorPlanGenerator(options).generate(
+            // Simulate a grouped source-set index returning the same declarations twice.
+            components = components + components,
+            symbols = emptyList(),
+            allKotlinPaths = sources.map(SourceFile::absolutePath),
+        )
+
+        DumbService.getInstance(project).waitForSmartMode()
+        val result = RefactorExecutor(project).execute(plan)
+
+        assertTrue(result.success, result.errors.joinToString())
+        assertEquals(declarations.size, result.classesRenamed)
+        for ((name, _) in declarations) {
+            val renamedPath = File(diskTestRoot, "sample/${name}Ref.kt").absolutePath
+            val text = readDocument(renamedPath)
+            assertTrue(
+                Regex("(?:class|interface|object)\\s+${name}Ref\\b").containsMatchIn(text),
+                "$name was not renamed in $renamedPath: $text",
+            )
+        }
+    }
+
+    @Test
+    fun `renames inconsistent single class filename from the class target`() {
+        val source = addKotlinFile(
+            "sample/ItemIntroFragment.kt",
+            """
+                package sample
+
+                class IntroItemFragment
+            """.trimIndent(),
+        )
+        val components = ComponentDiscoverer(project).discover(indexFor(listOf(source)))
+        val options = RefactorOptions(
+            suffixToAdd = "Ref",
+            refactorTypeAliases = false,
+            refactorStrings = false,
+            refactorColors = false,
+            refactorStyles = false,
+            refactorDrawables = false,
+            refactorLayouts = false,
+        )
+        val plan = RefactorPlanGenerator(options).generate(
+            components = components,
+            symbols = emptyList(),
+            allKotlinPaths = listOf(source.absolutePath),
+        )
+
+        assertEquals("IntroItemFragmentRef.kt", plan.fileRenames.single().newFileName)
+        DumbService.getInstance(project).waitForSmartMode()
+        val result = RefactorExecutor(project).execute(plan)
+
+        assertTrue(result.success, result.errors.joinToString())
+        val renamedPath = File(diskTestRoot, "sample/IntroItemFragmentRef.kt").absolutePath
+        assertTrue(File(renamedPath).exists(), "class-derived file was not renamed")
+        assertTrue(Regex("class\\s+IntroItemFragmentRef\\b").containsMatchIn(readDocument(renamedPath)))
+    }
+
+    @Test
+    fun `repairs a repeated suffix left by an interrupted rename`() {
+        val source = addKotlinFile(
+            "sample/ItemIntroFragment.kt",
+            """
+                package sample
+
+                class IntroItemFragmentRefRef
+            """.trimIndent(),
+        )
+        val components = ComponentDiscoverer(project).discover(indexFor(listOf(source)))
+        val options = RefactorOptions(
+            suffixToAdd = "Ref",
+            refactorTypeAliases = false,
+            refactorStrings = false,
+            refactorColors = false,
+            refactorStyles = false,
+            refactorDrawables = false,
+            refactorLayouts = false,
+        )
+        val plan = RefactorPlanGenerator(options).generate(
+            components = components,
+            symbols = emptyList(),
+            allKotlinPaths = listOf(source.absolutePath),
+        )
+
+        assertEquals("IntroItemFragmentRef.kt", plan.fileRenames.single().newFileName)
+        DumbService.getInstance(project).waitForSmartMode()
+        val result = RefactorExecutor(project).execute(plan)
+
+        assertTrue(result.success, result.errors.joinToString())
+        val renamedPath = File(diskTestRoot, "sample/IntroItemFragmentRef.kt").absolutePath
+        assertTrue(File(renamedPath).exists(), "repeated-suffix file was not renamed")
+        assertTrue(
+            Regex("class\\s+IntroItemFragmentRef\\b").containsMatchIn(readDocument(renamedPath)),
+            "declaration still has a repeated suffix: ${readDocument(renamedPath)}",
+        )
+    }
+
     private fun addKotlinFile(name: String, text: String): SourceFile {
         val file = File(diskTestRoot, name)
         file.parentFile.mkdirs()
@@ -148,6 +274,7 @@ class KotlinClassRefactorTest : BasePlatformTestCase() {
     private fun readDocument(path: String): String = ReadAction.compute<String, RuntimeException> {
         val virtualFile = LocalFileSystem.getInstance().findFileByPath(path) ?: return@compute ""
         val psiFile = PsiManager.getInstance(project).findFile(virtualFile) ?: return@compute ""
-        PsiDocumentManager.getInstance(project).getDocument(psiFile)?.text.orEmpty()
+        val documentText = PsiDocumentManager.getInstance(project).getDocument(psiFile)?.text.orEmpty()
+        if (documentText.isNotEmpty()) documentText else File(path).takeIf { it.exists() }?.readText().orEmpty()
     }
 }

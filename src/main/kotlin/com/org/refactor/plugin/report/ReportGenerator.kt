@@ -129,6 +129,7 @@ class ReportGenerator {
             appendLine("| Duplicate symbols | ${if (verification.duplicateSymbols.isEmpty()) "✅" else "❌ ${verification.duplicateSymbols.size}"} |")
             appendLine("| Broken imports | ${if (verification.brokenImports.isEmpty()) "✅" else "❌ ${verification.brokenImports.size}"} |")
             appendLine("| Stale resource references | ${if (verification.staleResourceReferences.isEmpty()) "OK" else "FAILED ${verification.staleResourceReferences.size}"} |")
+            appendLine("| Class/file mismatches | ${if (verification.classFileMismatches.isEmpty()) "✅" else "❌ ${verification.classFileMismatches.size}"} |")
             appendLine()
             appendLine("**Overall:** ${if (verification.passed) "✅ PASSED" else "❌ FAILED"}")
         }

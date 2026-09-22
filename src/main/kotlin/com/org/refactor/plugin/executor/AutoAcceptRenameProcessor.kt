@@ -2,6 +2,8 @@ package com.org.refactor.plugin.executor
 
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiManager
+import com.intellij.psi.PsiNamedElement
 import com.intellij.refactoring.rename.RenameProcessor
 import com.intellij.refactoring.rename.naming.AutomaticRenamer
 import com.intellij.refactoring.rename.naming.AutomaticRenamerFactory
@@ -12,12 +14,20 @@ internal class AutoAcceptRenameProcessor(
     project: Project,
     element: PsiElement,
     newName: String,
+    private val explicitElements: Collection<PsiElement> = emptyList(),
+    private val acceptAutomaticRenames: Boolean = true,
 ) : RenameProcessor(project, element, newName, false, false) {
+
+    private val psiManager = PsiManager.getInstance(project)
 
     override fun isPreviewUsages(usages: Array<UsageInfo>): Boolean = false
 
     override fun showAutomaticRenamingDialog(renamer: AutomaticRenamer): Boolean =
-        AutomaticRenamePolicy.acceptAll(renamer)
+        AutomaticRenamePolicy.acceptAll(renamer) { candidate ->
+            acceptAutomaticRenames && explicitElements.none { explicit ->
+                psiManager.areElementsEquivalent(explicit, candidate)
+            }
+        }
 
     /** Matches RenameRefactoring.respectAllAutomaticRenames without using its default processor. */
     fun respectAllAutomaticRenames(

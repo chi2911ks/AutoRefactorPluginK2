@@ -23,6 +23,7 @@ data class VerificationResult(
     val duplicateSymbols: List<String>, val brokenImports: List<String>,
     val checksRun: Int, val checksPassed: Int,
     val staleResourceReferences: List<String> = emptyList(),
+    val classFileMismatches: List<String> = emptyList(),
 )
 
 class VerificationEngine(private val project: Project) {
@@ -85,8 +86,10 @@ class VerificationEngine(private val project: Project) {
         }
 
         val staleResources = findStaleResourceReferences(plan)
+        val classFileMismatches = findClassFileMismatches(plan)
         val results = listOf(
-            psiErrors.isEmpty(), duplicates.isEmpty(), badImports.isEmpty(), staleResources.isEmpty(),
+            psiErrors.isEmpty(), duplicates.isEmpty(), badImports.isEmpty(),
+            staleResources.isEmpty(), classFileMismatches.isEmpty(),
         )
         return VerificationResult(
             passed = results.all { it },
@@ -96,8 +99,21 @@ class VerificationEngine(private val project: Project) {
             checksRun = results.size,
             checksPassed = results.count { it },
             staleResourceReferences = staleResources,
+            classFileMismatches = classFileMismatches,
         )
     }
+
+    private fun findClassFileMismatches(plan: RefactorPlan): List<String> =
+        plan.fileRenames.mapNotNull { rename ->
+            val virtualFile = LocalFileSystem.getInstance().findFileByPath(rename.newPath)
+                ?: return@mapNotNull "Missing renamed class file: ${rename.newPath}"
+            val psi = PsiManager.getInstance(project).findFile(virtualFile) as? PsiClassOwner
+                ?: return@mapNotNull "Not a class file: ${rename.newPath}"
+            val expectedName = virtualFile.nameWithoutExtension
+            if (psi.classes.none { it.name == expectedName }) {
+                "Class/file mismatch: ${virtualFile.path} expects $expectedName"
+            } else null
+        }
 
     private fun findStaleResourceReferences(plan: RefactorPlan): List<String> {
         val renames = plan.resourceRenames.filter { it.checked } +

@@ -1,6 +1,6 @@
 <idea-plugin>
     <id>com.org.refactor.plugin.k2</id>
-    <name>Kotlin/Java Auto Refactor (K2)</name>
+    <name>LazyRefactor</name>
     <vendor email="dev@example.com" url="https://example.com">Org</vendor>
 
     <description><![CDATA[
@@ -22,7 +22,7 @@
         <action
             id="AndroidRefactorK2.Start"
             class="com.org.refactor.plugin.AndroidRefactorAction"
-            text="Kotlin/Java Project Refactor (K2)"
+            text="LazyRefactor"
             description="Refactor Kotlin and Java classes, functions, and variables using the K2 Analysis API">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>

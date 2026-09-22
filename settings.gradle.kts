@@ -1,4 +1,4 @@
-rootProject.name = "AutoRefactorPluginK2"
+rootProject.name = "LazyRefactor"
 
 pluginManagement {
     repositories {

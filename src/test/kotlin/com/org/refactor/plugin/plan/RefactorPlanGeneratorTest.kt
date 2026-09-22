@@ -63,6 +63,14 @@ class RefactorPlanGeneratorTest {
     }
 
     @Test
+    fun `normalizes repeated target suffixes after an interrupted refactor`() {
+        val generator = RefactorPlanGenerator(RefactorOptions(suffixToAdd = "INV160"))
+
+        assertEquals("BaseBottomSheetDialogINV160", generator.transformName("BaseBottomSheetDialogINV160INV160"))
+        assertEquals("FeatureINV160", generator.transformName("FeatureINV160INV160INV160"))
+    }
+
+    @Test
     fun `removes all matching text anywhere without case sensitivity`() {
         val generator = RefactorPlanGenerator(
             RefactorOptions(suffixToAdd = "INV125", suffixToRemove = "inv069"),
