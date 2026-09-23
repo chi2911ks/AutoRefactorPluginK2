@@ -86,8 +86,18 @@ internal class ClassRenameBatch(
                 val retryResult = runChunkOnEdt(listOf(request))
                 renamed += retryResult.renamed
                 errors += retryResult.errors.map { "Batch $batches fallback: $it" }
-                if (retryResult.retryRequests.isNotEmpty()) {
-                    errors += "Batch $batches fallback: declaration did not rename to ${request.newName}"
+                for (pending in retryResult.retryRequests) {
+                    val repaired = try {
+                        repairUnchangedJavaClass(pending)
+                    } catch (error: Exception) {
+                        errors += "Batch $batches Java fallback: ${error.message ?: error.javaClass.simpleName}"
+                        false
+                    }
+                    if (repaired) {
+                        renamed++
+                    } else {
+                        errors += "Batch $batches fallback: declaration did not rename to ${pending.newName}"
+                    }
                 }
             }
         }
@@ -152,6 +162,30 @@ internal class ClassRenameBatch(
         if (ApplicationManager.getApplication().isDispatchThread) return
         ProgressManager.getInstance().progressIndicator?.text2 = "Waiting for indexes..."
         DumbService.getInstance(project).waitForSmartMode()
+    }
+
+    private fun repairUnchangedJavaClass(request: Request): Boolean {
+        val application = ApplicationManager.getApplication()
+        var attempt = 0
+        while (true) {
+            waitForIndexes()
+            try {
+                var repaired = false
+                val action = {
+                    val declaration = currentDeclaration(request.element, request.newName) as? PsiClass
+                    repaired = when {
+                        declaration == null -> false
+                        declaration.name == request.newName -> true
+                        else -> JavaClassRenameFallback.rename(project, declaration, request.newName) &&
+                            currentDeclaration(declaration, request.newName)?.name == request.newName
+                    }
+                }
+                if (application.isDispatchThread) action() else application.invokeAndWait(action)
+                return repaired
+            } catch (error: Throwable) {
+                if (!hasIndexNotReadyCause(error) || attempt++ >= MAX_INDEX_RETRIES) throw error
+            }
+        }
     }
 
     private fun executeChunk(chunk: List<PreparedRequest>): ChunkResult {

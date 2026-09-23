@@ -1,10 +1,12 @@
 package com.org.refactor.plugin.executor
 
 import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiManager
+import com.intellij.psi.PsiJavaFile
 import com.intellij.testFramework.PsiTestUtil
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import com.org.refactor.plugin.discovery.ComponentDiscoverer
@@ -246,6 +248,97 @@ class KotlinClassRefactorTest : BasePlatformTestCase() {
         )
     }
 
+    @Test
+    fun `renames Java abstract class and interface with their usages`() {
+        val base = addJavaFile("sample/DecryptionMaterial.java", "package sample; public abstract class DecryptionMaterial {}")
+        val contract = addJavaFile("sample/PDContentStream.java", "package sample; public interface PDContentStream { void read(); }")
+        val usage = addJavaFile(
+            "sample/usage/Usage.java",
+            "package sample.usage; import sample.DecryptionMaterial; import sample.PDContentStream; public class Usage extends DecryptionMaterial implements PDContentStream { public void read() {} }",
+        )
+        val sources = listOf(base, contract, usage)
+        val components = ComponentDiscoverer(project).discover(indexFor(sources))
+            .filter { it.className != "Usage" }
+        val options = RefactorOptions(
+            suffixToAdd = "INV160",
+            refactorTypeAliases = false,
+            refactorStrings = false,
+            refactorColors = false,
+            refactorStyles = false,
+            refactorDrawables = false,
+            refactorLayouts = false,
+        )
+        val plan = RefactorPlanGenerator(options).generate(
+            components = components,
+            symbols = emptyList(),
+            allKotlinPaths = emptyList(),
+        )
+
+        DumbService.getInstance(project).waitForSmartMode()
+        val result = RefactorExecutor(project).execute(plan)
+
+        assertTrue(result.success, result.errors.joinToString())
+        assertEquals(2, result.classesRenamed)
+        assertTrue("class DecryptionMaterialINV160" in readDocument(base.absolutePath.replace("DecryptionMaterial.java", "DecryptionMaterialINV160.java")))
+        assertTrue("interface PDContentStreamINV160" in readDocument(contract.absolutePath.replace("PDContentStream.java", "PDContentStreamINV160.java")))
+        val usageText = readDocument(usage.absolutePath)
+        assertTrue("import sample.DecryptionMaterialINV160;" in usageText, usageText)
+        assertTrue("import sample.PDContentStreamINV160;" in usageText, usageText)
+        assertTrue("extends DecryptionMaterialINV160" in usageText, usageText)
+        assertTrue("implements PDContentStreamINV160" in usageText, usageText)
+    }
+
+    @Test
+    fun `repairs Java class and interface left unchanged by a rename processor`() {
+        val base = addJavaFile("sample/DecryptionMaterial.java", "package sample; public abstract class DecryptionMaterial {}")
+        val contract = addJavaFile("sample/PDContentStream.java", "package sample; public interface PDContentStream { void read(); }")
+        val usage = addJavaFile(
+            "sample/usage/Usage.java",
+            "package sample.usage; import sample.DecryptionMaterial; import sample.PDContentStream; public class Usage extends DecryptionMaterial implements PDContentStream { public void read() {} }",
+        )
+        DumbService.getInstance(project).waitForSmartMode()
+        var baseRepaired = false
+        var contractRepaired = false
+        ApplicationManager.getApplication().invokeAndWait {
+            val javaFile = PsiManager.getInstance(project).findFile(
+                LocalFileSystem.getInstance().findFileByPath(base.absolutePath)!!,
+            ) as PsiJavaFile
+            baseRepaired = JavaClassRenameFallback.rename(project, javaFile.classes.single(), "DecryptionMaterialINV160")
+            val interfaceFile = PsiManager.getInstance(project).findFile(
+                LocalFileSystem.getInstance().findFileByPath(contract.absolutePath)!!,
+            ) as PsiJavaFile
+            contractRepaired = JavaClassRenameFallback.rename(project, interfaceFile.classes.single(), "PDContentStreamINV160")
+        }
+
+        assertTrue(baseRepaired)
+        assertTrue(contractRepaired)
+        val renamedPath = base.absolutePath.replace("DecryptionMaterial.java", "DecryptionMaterialINV160.java")
+        val classText = readDocument(base.absolutePath) + readDocument(renamedPath)
+        assertTrue("class DecryptionMaterialINV160" in classText, classText)
+        val renamedInterfacePath = contract.absolutePath.replace("PDContentStream.java", "PDContentStreamINV160.java")
+        val interfaceText = readDocument(contract.absolutePath) + readDocument(renamedInterfacePath)
+        assertTrue("interface PDContentStreamINV160" in interfaceText, interfaceText)
+        val usageText = readDocument(usage.absolutePath)
+        assertTrue("import sample.DecryptionMaterialINV160;" in usageText, usageText)
+        assertTrue("import sample.PDContentStreamINV160;" in usageText, usageText)
+        assertTrue("extends DecryptionMaterialINV160" in usageText, usageText)
+        assertTrue("implements PDContentStreamINV160" in usageText, usageText)
+    }
+
+    private fun addJavaFile(name: String, text: String): SourceFile {
+        val file = File(diskTestRoot, name)
+        file.parentFile.mkdirs()
+        file.writeText(text)
+        val virtualFile = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file)
+            ?: error("missing physical fixture ${file.absolutePath}")
+        return SourceFile(
+            virtualFilePath = virtualFile.path,
+            absolutePath = file.absolutePath,
+            moduleName = "test",
+            fileType = FileType.JAVA,
+        )
+    }
+
     private fun addKotlinFile(name: String, text: String): SourceFile {
         val file = File(diskTestRoot, name)
         file.parentFile.mkdirs()
@@ -262,8 +355,8 @@ class KotlinClassRefactorTest : BasePlatformTestCase() {
 
     private fun indexFor(sources: List<SourceFile>): ProjectIndex = ProjectIndex(
         modules = emptyList(),
-        allKotlinFiles = sources,
-        allJavaFiles = emptyList(),
+        allKotlinFiles = sources.filter { it.fileType == FileType.KOTLIN },
+        allJavaFiles = sources.filter { it.fileType == FileType.JAVA },
         allXmlFiles = emptyList(),
         manifestFiles = emptyList(),
         navigationGraphs = emptyList(),
