@@ -34,15 +34,17 @@ class RefactorPlanGenerator(private val options: RefactorOptions) {
         strings: List<StringResourceInfo> = emptyList(),
         valueXmlFiles: List<ValueXmlFileInfo> = emptyList(),
     ): RefactorPlan {
+        val uniqueComponents = components.distinctBy {
+            Triple(it.file.absolutePath, it.declarationOffset, it.fqn)
+        }
         val componentRenames = if (options.refactorClasses) {
             // A source set can expose the same PSI declaration more than once when modules are
             // grouped (for example app.main + app). Keep one request per declaration. Passing
             // duplicates to RenameProcessor is unsafe: the first request changes the declaration
             // and a later request can be applied to the already-renamed PSI element, producing a
             // second suffix while the report still describes the original plan.
-            components
+            uniqueComponents
                 .mapNotNull(::classRename)
-                .distinctBy { Triple(it.sourceFile, it.declarationOffset, it.fqn) }
         } else {
             emptyList()
         }
@@ -67,11 +69,11 @@ class RefactorPlanGenerator(private val options: RefactorOptions) {
             )
         }
 
-        val topLevelComponentsByFile = components
+        val topLevelComponentsByFile = uniqueComponents
             .filter { it.isTopLevel }
             .groupBy { it.file.absolutePath }
         val fileRenames = componentRenames.mapNotNull { rename ->
-            val component = components.firstOrNull {
+            val component = uniqueComponents.firstOrNull {
                 it.fqn == rename.fqn && it.declarationOffset == rename.declarationOffset
             } ?: return@mapNotNull null
             if (!component.isTopLevel) return@mapNotNull null
