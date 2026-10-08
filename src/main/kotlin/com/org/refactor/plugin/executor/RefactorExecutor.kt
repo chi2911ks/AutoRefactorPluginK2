@@ -3,6 +3,7 @@ package com.org.refactor.plugin.executor
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.IndexNotReadyException
@@ -149,9 +150,12 @@ class RefactorExecutor(private val project: Project) {
             warnings.add("Class rename did not complete; class file renames were skipped")
         }
 
-        // ═══ Post: XML + ProGuard + Files ═══
+        // ═══ Post: XML, ProGuard, native references, and files ═══
         val classMap = buildClassReferenceMap(unchecked)
         if (classMap.isNotEmpty()) {
+            // Native references use JVM-qualified paths. A simple-name entry is only needed by
+            // XML and could also be an unrelated C++ string or default-package JNI export.
+            val nativeClassMap = unchecked.associate { it.fqn to classMap.getValue(it.fqn) }
             val classReferenceFiles = readWhenSmart {
                 val scope = GlobalSearchScope.projectScope(project)
                 buildSet {
@@ -160,12 +164,21 @@ class RefactorExecutor(private val project: Project) {
                     for (name in PROGUARD_FILE_NAMES) {
                         addAll(FilenameIndex.getVirtualFilesByName(project, name, scope))
                     }
+                    for (extension in NATIVE_SOURCE_EXTENSIONS) {
+                        addAll(FilenameIndex.getAllFilesByExt(project, extension, scope))
+                    }
                 }
             }
-            // Keep the indexed file set, but commit all XML/ProGuard edits as one write command.
+            // Keep the indexed file set, but commit all reference edits as one write command.
             // A command per file makes large all-module refactors spend most of their time in
             // command/undo bookkeeping and repeatedly invalidates PSI on the EDT.
-            applyToDocs(classReferenceFiles) { ClassReferenceRewriter.rewrite(it, classMap) }
+            referencesUpdated += applyToDocs(classReferenceFiles) { file, content ->
+                if (file.extension?.lowercase() in NATIVE_SOURCE_EXTENSIONS) {
+                    CppClassReferenceRewriter.rewrite(content, nativeClassMap)
+                } else {
+                    ClassReferenceRewriter.rewrite(content, classMap)
+                }
+            }
         }
 
         // Resource text changes can shift arbitrary Kotlin offsets, so apply them only after all
@@ -564,11 +577,10 @@ class RefactorExecutor(private val project: Project) {
         }
     }
 
-    private fun applyToDocs(files: Set<VirtualFile>, transform: (String) -> String): Int = runOnEdt {
+    private fun applyToDocs(files: Set<VirtualFile>, transform: (VirtualFile, String) -> String): Int = runOnEdt {
         val documents = files.mapNotNull { vf ->
-            val psi = PsiManager.getInstance(project).findFile(vf) ?: return@mapNotNull null
-            val document = PsiDocumentManager.getInstance(project).getDocument(psi) ?: return@mapNotNull null
-            document to transform(document.text)
+            val document = FileDocumentManager.getInstance().getDocument(vf) ?: return@mapNotNull null
+            document to transform(vf, document.text)
         }.filter { (document, text) -> text != document.text }
         if (documents.isEmpty()) return@runOnEdt 0
 
@@ -684,5 +696,6 @@ class RefactorExecutor(private val project: Project) {
             "proguard-rules.txt",
             "proguard.cfg",
         )
+        val NATIVE_SOURCE_EXTENSIONS = setOf("c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx")
     }
 }

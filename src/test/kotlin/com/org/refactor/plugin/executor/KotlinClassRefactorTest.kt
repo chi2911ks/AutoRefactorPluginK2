@@ -123,6 +123,53 @@ class KotlinClassRefactorTest : BasePlatformTestCase() {
     }
 
     @Test
+    fun `updates JNI references in indexed cpp and header files after class rename`() {
+        val source = addKotlinFile(
+            "sample/NativeScreen.kt",
+            "package sample\nclass NativeScreen",
+        )
+        val cpp = File(diskTestRoot, "native/screen.cpp").also { file ->
+            file.parentFile.mkdirs()
+            file.writeText("""
+                auto cls = env->FindClass("sample/NativeScreen");
+                auto label = "NativeScreen";
+                JNIEXPORT void JNICALL Java_sample_NativeScreen_open(JNIEnv*, jobject) {}
+            """.trimIndent())
+            LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file)
+        }
+        val header = File(diskTestRoot, "native/screen.h").also { file ->
+            file.writeText("const char* signature = \"(Lsample/NativeScreen;)V\";")
+            LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file)
+        }
+        val options = RefactorOptions(
+            suffixToAdd = "Ref",
+            refactorTypeAliases = false,
+            refactorStrings = false,
+            refactorColors = false,
+            refactorStyles = false,
+            refactorDrawables = false,
+            refactorLayouts = false,
+        )
+        val plan = RefactorPlanGenerator(options).generate(
+            components = ComponentDiscoverer(project).discover(indexFor(listOf(source))),
+            symbols = emptyList(),
+            allKotlinPaths = listOf(source.absolutePath),
+        )
+
+        DumbService.getInstance(project).waitForSmartMode()
+        val result = RefactorExecutor(project).execute(plan)
+        val cppText = readDocument(cpp.absolutePath)
+        val headerText = readDocument(header.absolutePath)
+
+        assertTrue(result.success, result.errors.joinToString())
+        assertEquals(1, result.classesRenamed)
+        assertTrue("FindClass(\"sample/NativeScreenRef\")" in cppText, "cpp=$cppText")
+        assertTrue("label = \"NativeScreen\"" in cppText, "cpp=$cppText")
+        assertTrue("Java_sample_NativeScreenRef_open" in cppText, "cpp=$cppText")
+        assertTrue("Lsample/NativeScreenRef;" in headerText, "header=$headerText")
+    }
+
+    @Test
     fun `renames every declaration across class shapes and batch boundary`() {
         val declarations = listOf(
             "FeatureViewModel" to "class FeatureViewModel",
